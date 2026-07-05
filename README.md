@@ -10,11 +10,15 @@ eventual home for the shippable library. See the design docs below.
 ## Status
 
 - **Milestone 0 — done.** Z-set kernel + a hand-wired, oracle-checked
-  `SELECT category, COUNT(*), SUM(amount) GROUP BY category` view. 28 tests
-  green, including property tests over thousands of random insert/delete deltas.
-- **Milestone 1 — in progress.** Composable operators (filter, project, inner
-  join, COUNT, SUM) assembled into per-view operator graphs from an explicit
-  plan.
+  `SELECT category, COUNT(*), SUM(amount) GROUP BY category` view.
+- **Milestone 1 — done.** Composable operators (filter, project, inner join,
+  COUNT, SUM), each consuming input deltas and emitting output deltas while
+  keeping only the state it needs. A view is an operator graph compiled from an
+  explicit plan; the engine fans one base delta out to many views over the same
+  tables. The inner join is bilinear — it retains the full Z-set of both inputs,
+  not a one-sided lookup. 155 tests green: every operator has its own recompute-
+  oracle property test, and a two-join + one-aggregate view passes the oracle
+  over random insert/delete streams (drained to empty).
 
 ## The one rule
 
@@ -33,11 +37,18 @@ python -m pytest tests/ -q
 
 ```
 ivm/
-  zset.py      # Z-set: row tuple -> integer weight (the DBSP primitive)
-  view.py      # Milestone 0 hand-wired GROUP BY view
-  oracle.py    # from-scratch recompute, for tests only
+  zset.py       # Z-set: row tuple -> integer weight (the DBSP primitive)
+  row.py        # named-column access over a value-tuple row
+  plan.py       # declarative plan nodes: Source/Filter/Project/Join/Aggregate
+  operators.py  # incremental operators (delta in -> delta out) + compiler
+  engine.py     # Engine (shared sources) + View (materialized result)
+  view.py       # Milestone 0 hand-wired GROUP BY view
+  oracle.py     # from-scratch recompute (M0) + eval_plan (M1), tests only
 tests/
-  test_oracle_equivalence.py   # property tests: incremental == oracle
+  test_oracle_equivalence.py   # M0: hand-wired GROUP BY vs oracle
+  test_filter.py test_project.py test_aggregate.py test_join.py
+  test_view_integration.py     # two-join + one-aggregate + multi-view
+  harness.py                   # the oracle side of every property test
 ```
 
 ## Design docs

@@ -270,6 +270,175 @@ class LeftJoinOp(Operator):
         self._emit(ZSet(out))
 
 
+class RightJoinOp(Operator):
+    """RIGHT OUTER equi-join — the mirror of LeftJoinOp. Preserves all right
+    rows; an unmatched right row is right-padded (left non-key NULL, the shared
+    key coalesced from the right row). The flip is driven by LEFT-side
+    transitions: a left insert/delete that flips a key between "no left" and
+    "some left" flips every right row at that key between padded and matched."""
+
+    def __init__(self, left_keys, right_keys, left_schema, right_schema):
+        super().__init__()
+        lidx = index_of(left_schema)
+        ridx = index_of(right_schema)
+        self._lk = [lidx[c] for c in left_keys]
+        self._rk = [ridx[c] for c in right_keys]
+        right_keyset = set(right_keys)
+        self._r_nonkey = [i for i, name in enumerate(right_schema) if name not in right_keyset]
+        self._left_len = len(left_schema)
+        self._left_index = {}   # join key -> {left_row: weight}
+        self._right_index = {}  # join key -> {right_row: weight}
+
+    def _combine(self, lrow, rrow):
+        return lrow + tuple(rrow[i] for i in self._r_nonkey)
+
+    def _rightpad(self, rrow):
+        # left non-key columns are NULL; the shared key comes from the right row
+        parts = [None] * self._left_len
+        for lpos, rpos in zip(self._lk, self._rk):
+            parts[lpos] = rrow[rpos]
+        return tuple(parts) + tuple(rrow[i] for i in self._r_nonkey)
+
+    @staticmethod
+    def _empty(index, key):
+        return not index.get(key)
+
+    def on_right(self, delta):  # easy side: match against current left, else pad
+        out = {}
+        for rrow, rw in delta.items():
+            key = tuple(rrow[i] for i in self._rk)
+            bucket = self._left_index.get(key)
+            if bucket:
+                for lrow, lw in bucket.items():
+                    combined = self._combine(lrow, rrow)
+                    out[combined] = out.get(combined, 0) + lw * rw
+            else:
+                pad = self._rightpad(rrow)
+                out[pad] = out.get(pad, 0) + rw
+        _integrate(self._right_index, self._rk, delta)
+        self._emit(ZSet(out))
+
+    def on_left(self, delta):  # hard side: left transitions flip right-pads
+        out = {}
+        keys = {tuple(lrow[i] for i in self._lk) for lrow, _lw in delta.items()}
+        before_empty = {k: self._empty(self._left_index, k) for k in keys}
+        for lrow, lw in delta.items():
+            key = tuple(lrow[i] for i in self._lk)
+            for rrow, rw in self._right_index.get(key, {}).items():
+                combined = self._combine(lrow, rrow)
+                out[combined] = out.get(combined, 0) + lw * rw
+        _integrate(self._left_index, self._lk, delta)
+        for key in keys:
+            after_empty = self._empty(self._left_index, key)
+            if before_empty[key] and not after_empty:
+                sign = -1  # left match appeared: retract right-pads
+            elif not before_empty[key] and after_empty:
+                sign = +1  # left match gone: assert right-pads
+            else:
+                continue
+            for rrow, rw in self._right_index.get(key, {}).items():
+                pad = self._rightpad(rrow)
+                out[pad] = out.get(pad, 0) + sign * rw
+        self._emit(ZSet(out))
+
+
+class FullJoinOp(Operator):
+    """FULL OUTER equi-join. Preserves BOTH sides: matched rows combined,
+    unmatched left rows left-padded, unmatched right rows right-padded. A key is
+    never both left- and right-padded (any key with both sides present is fully
+    matched). Both sides flip: a left change flips the right rows at a key, a
+    right change flips the left rows."""
+
+    def __init__(self, left_keys, right_keys, left_schema, right_schema):
+        super().__init__()
+        lidx = index_of(left_schema)
+        ridx = index_of(right_schema)
+        self._lk = [lidx[c] for c in left_keys]
+        self._rk = [ridx[c] for c in right_keys]
+        right_keyset = set(right_keys)
+        self._r_nonkey = [i for i, name in enumerate(right_schema) if name not in right_keyset]
+        self._left_len = len(left_schema)
+        self._pad = (None,) * len(self._r_nonkey)
+        self._left_index = {}
+        self._right_index = {}
+
+    def _combine(self, lrow, rrow):
+        return lrow + tuple(rrow[i] for i in self._r_nonkey)
+
+    def _leftpad(self, lrow):
+        return lrow + self._pad
+
+    def _rightpad(self, rrow):
+        parts = [None] * self._left_len
+        for lpos, rpos in zip(self._lk, self._rk):
+            parts[lpos] = rrow[rpos]
+        return tuple(parts) + tuple(rrow[i] for i in self._r_nonkey)
+
+    @staticmethod
+    def _empty(index, key):
+        return not index.get(key)
+
+    def on_left(self, delta):
+        out = {}
+        keys = {tuple(lrow[i] for i in self._lk) for lrow, _lw in delta.items()}
+        before_empty = {k: self._empty(self._left_index, k) for k in keys}
+        # inner-join change + left-pad for the delta'd left rows themselves
+        for lrow, lw in delta.items():
+            key = tuple(lrow[i] for i in self._lk)
+            rbucket = self._right_index.get(key)
+            if rbucket:
+                for rrow, rw in rbucket.items():
+                    combined = self._combine(lrow, rrow)
+                    out[combined] = out.get(combined, 0) + lw * rw
+            else:
+                pad = self._leftpad(lrow)
+                out[pad] = out.get(pad, 0) + lw
+        _integrate(self._left_index, self._lk, delta)
+        # left transitions flip the RIGHT rows at the key
+        for key in keys:
+            after_empty = self._empty(self._left_index, key)
+            if before_empty[key] and not after_empty:
+                sign = -1  # left appeared: right rows go matched -> retract right-pads
+            elif not before_empty[key] and after_empty:
+                sign = +1  # left gone: right rows go unmatched -> assert right-pads
+            else:
+                continue
+            for rrow, rw in self._right_index.get(key, {}).items():
+                pad = self._rightpad(rrow)
+                out[pad] = out.get(pad, 0) + sign * rw
+        self._emit(ZSet(out))
+
+    def on_right(self, delta):
+        out = {}
+        keys = {tuple(rrow[i] for i in self._rk) for rrow, _rw in delta.items()}
+        before_empty = {k: self._empty(self._right_index, k) for k in keys}
+        # inner-join change + right-pad for the delta'd right rows themselves
+        for rrow, rw in delta.items():
+            key = tuple(rrow[i] for i in self._rk)
+            lbucket = self._left_index.get(key)
+            if lbucket:
+                for lrow, lw in lbucket.items():
+                    combined = self._combine(lrow, rrow)
+                    out[combined] = out.get(combined, 0) + lw * rw
+            else:
+                pad = self._rightpad(rrow)
+                out[pad] = out.get(pad, 0) + rw
+        _integrate(self._right_index, self._rk, delta)
+        # right transitions flip the LEFT rows at the key
+        for key in keys:
+            after_empty = self._empty(self._right_index, key)
+            if before_empty[key] and not after_empty:
+                sign = -1  # right appeared: left rows go matched -> retract left-pads
+            elif not before_empty[key] and after_empty:
+                sign = +1  # right gone: left rows go unmatched -> assert left-pads
+            else:
+                continue
+            for lrow, lw in self._left_index.get(key, {}).items():
+                pad = self._leftpad(lrow)
+                out[pad] = out.get(pad, 0) + sign * lw
+        self._emit(ZSet(out))
+
+
 def _integrate(index, key_idx, delta):
     """Fold a delta into a key -> {row: weight} index, dropping zeros."""
     for row, w in delta.items():
@@ -347,6 +516,20 @@ def compile_plan(node, engine):
         if len(set(out_schema)) != len(out_schema):
             raise ValueError(f"left join output has duplicate column names: {out_schema}")
         op = LeftJoinOp(node.left_keys, node.right_keys, ls, rs)
+        lop.subscribe(op.on_left)
+        rop.subscribe(op.on_right)
+        return op, out_schema
+
+    if isinstance(node, (P.RightJoin, P.FullJoin)):
+        lop, ls = compile_plan(node.left, engine)
+        rop, rs = compile_plan(node.right, engine)
+        right_keyset = set(node.right_keys)
+        r_nonkey = [i for i, name in enumerate(rs) if name not in right_keyset]
+        out_schema = tuple(ls) + tuple(rs[i] for i in r_nonkey)
+        if len(set(out_schema)) != len(out_schema):
+            raise ValueError(f"outer join output has duplicate column names: {out_schema}")
+        op_cls = RightJoinOp if isinstance(node, P.RightJoin) else FullJoinOp
+        op = op_cls(node.left_keys, node.right_keys, ls, rs)
         lop.subscribe(op.on_left)
         rop.subscribe(op.on_right)
         return op, out_schema

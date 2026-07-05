@@ -114,7 +114,34 @@ class LeftJoin:
     change that flips a key between "no matches" and "some match" must flip every
     left row at that key between its padded and matched forms.
 
-    (RIGHT/FULL outer joins are deferred.)"""
+    """
+
+    left: object
+    right: object
+    left_keys: tuple
+    right_keys: tuple
+
+
+@dataclass(frozen=True)
+class RightJoin:
+    """RIGHT OUTER equi-join — the mirror of LeftJoin. Every right row appears;
+    unmatched right rows are NULL-padded on the left (left non-key = None), with
+    the shared key coalesced from the right. Same output schema as inner/LEFT.
+    Non-linear: a left-side change flips every right row at a key between padded
+    and matched."""
+
+    left: object
+    right: object
+    left_keys: tuple
+    right_keys: tuple
+
+
+@dataclass(frozen=True)
+class FullJoin:
+    """FULL OUTER equi-join. Every left AND right row appears: matched rows
+    combined, unmatched left rows left-padded (right non-key = None), unmatched
+    right rows right-padded (left non-key = None, key coalesced from the right).
+    Both sides flip. Same output schema as inner/LEFT."""
 
     left: object
     right: object

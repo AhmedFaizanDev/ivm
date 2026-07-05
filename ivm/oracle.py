@@ -126,6 +126,64 @@ def eval_plan(plan, tables):
                 acc[padded] = acc.get(padded, 0) + lw
         return out_schema, ZSet(acc)
 
+    if isinstance(plan, (P.RightJoin, P.FullJoin)):
+        ls, lz = eval_plan(plan.left, tables)
+        rs, rz = eval_plan(plan.right, tables)
+        lidx = index_of(ls)
+        ridx = index_of(rs)
+        lk = [lidx[c] for c in plan.left_keys]
+        rk = [ridx[c] for c in plan.right_keys]
+        right_keyset = set(plan.right_keys)
+        r_nonkey = [i for i, name in enumerate(rs) if name not in right_keyset]
+        out_schema = tuple(ls) + tuple(rs[i] for i in r_nonkey)
+        left_len = len(ls)
+        left_pad = (None,) * len(r_nonkey)
+
+        def rightpad(rrow):
+            parts = [None] * left_len
+            for lpos, rpos in zip(lk, rk):
+                parts[lpos] = rrow[rpos]
+            return tuple(parts) + tuple(rrow[i] for i in r_nonkey)
+
+        left_by_key = {}
+        for lrow, lw in lz.items():
+            left_by_key.setdefault(tuple(lrow[i] for i in lk), []).append((lrow, lw))
+        right_by_key = {}
+        for rrow, rw in rz.items():
+            right_by_key.setdefault(tuple(rrow[i] for i in rk), []).append((rrow, rw))
+
+        acc = {}
+        if isinstance(plan, P.FullJoin):
+            # matched + left-unmatched, iterating left rows
+            for lrow, lw in lz.items():
+                key = tuple(lrow[i] for i in lk)
+                matches = right_by_key.get(key)
+                if matches:
+                    for rrow, rw in matches:
+                        combined = lrow + tuple(rrow[i] for i in r_nonkey)
+                        acc[combined] = acc.get(combined, 0) + lw * rw
+                else:
+                    padded = lrow + left_pad
+                    acc[padded] = acc.get(padded, 0) + lw
+            # right-unmatched only (matched already emitted above)
+            for rrow, rw in rz.items():
+                key = tuple(rrow[i] for i in rk)
+                if not left_by_key.get(key):
+                    padded = rightpad(rrow)
+                    acc[padded] = acc.get(padded, 0) + rw
+        else:  # RightJoin: iterate right rows (matched, else right-padded)
+            for rrow, rw in rz.items():
+                key = tuple(rrow[i] for i in rk)
+                matches = left_by_key.get(key)
+                if matches:
+                    for lrow, lw in matches:
+                        combined = lrow + tuple(rrow[i] for i in r_nonkey)
+                        acc[combined] = acc.get(combined, 0) + lw * rw
+                else:
+                    padded = rightpad(rrow)
+                    acc[padded] = acc.get(padded, 0) + rw
+        return out_schema, ZSet(acc)
+
     raise NotImplementedError(f"oracle has no rule for {type(plan).__name__}")
 
 

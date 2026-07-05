@@ -58,6 +58,16 @@ Give the engine a change feed instead of a hand-fed delta stream.
 
 **Done when:** an example app mutates data through the adapter and a maintained view stays correct against the oracle with zero manual delta feeding.
 
+**✅ DONE 2026-07-05.** In-process mutation log (PK-keyed) + SQLite adapter with two backends (trigger changelog on stdlib, session/apsw as primary). Oracle runs through the adapter over real DB contents. All three update-hook blind spots (truncate DELETE, INSERT OR REPLACE, WITHOUT ROWID) covered on both backends. 199 tests green (44 adapter), 0 skipped (apsw genuinely runs). Commit `d92d8d1`.
+
+**BUGS FOUND IN REVIEW (2026-07-05) — trigger backend only, fix before relying on it:**
+1. **Float precision loss (SILENT WRONG ANSWER).** The trigger captures rows via `json_array(...)` → `json.loads`, but SQLite's JSON formats reals lossily: `0.1+0.2` reads native as `0.30000000000000004` yet comes back from JSON as `0.3`. The captured delta row then never cancels against `contents()`'s native row, so the view silently diverges from the oracle. Masked today because every property test uses integer amounts. This is the exact failure mode the project exists to prevent.
+2. **BLOB crash.** `json_array` raises "JSON cannot hold BLOB values", so any maintained table with a BLOB column errors on every write through the trigger backend.
+   Root cause: JSON serialization in the triggers. The session/apsw backend is unaffected (native values, matches `contents()`). Proper fix: replace the JSON changelog with a native-typed per-table changelog (store real column values, not JSON), OR at minimum guard `register()` to raise loudly on REAL/BLOB columns for the trigger backend and document the limitation. Do this TDD: add a failing oracle test with float + blob columns through the trigger backend first.
+3. **Backend concurrency divergence (document, not a bug).** Triggers capture writes from *any* connection to the DB; the session backend only sees writes on its own connection. The two "equivalent" adapters differ here — users should choose knowingly.
+
+**RUNTIME TAX (now material).** Full suite is ~2 min (was ~7s at M1); adapter tests alone ~26s. This is the oracle-recompute cost (KNOWN LIMITATION #2) and it will worsen every milestone. Cheap fix before M3 adds more: in the long property tests, check the oracle every N steps instead of every step (keep a couple of full-every-step seeds), and/or trim seed counts. Self-contained, ~30 min.
+
 ## Milestone 3 — the hard correctness cases and the cost model
 
 This is where IVM stops being a toy.
@@ -68,6 +78,17 @@ This is where IVM stops being a toy.
 - Watch state size from here on. The verified Materialize post-mortem: differential-dataflow-style IVM started at ~96 bytes of overhead per maintained record and took months of expert work to reach 0-16 bytes. Join/DISTINCT/MIN-MAX state growth is the long-term scaling wall — not algorithm correctness. The Python prototype will NOT surface this (that is the known blind spot of Python-first); just record state sizes in tests so the Rust port has baselines.
 
 **Done when:** tier-2 coverage (from the architecture doc) passes the oracle test, and the cost model demonstrably falls back to recompute on a large bulk update.
+
+**✅ MOSTLY DONE 2026-07-05** (commits 9cd7163…0c795fc, 317 tests green in ~36s). Delivered: trigger float/BLOB fix (native-typed changelog), runtime throttle, AVG (linear), MIN/MAX (non-linear, per-group value multiset with delete-recovery), deletes-in-joins hardening, self-join/diamond, experimental hybrid cost model.
+
+**Independently verified in review (2026-07-05), not taken on trust:**
+- Self-join cross-term (KNOWN LIMITATION #1) — was already correct, not broken. Confirmed by hand-proof (both propagation orders capture ΔL⋈ΔR exactly once) AND a genuinely adversarial shared-source property test (small id pool, 400 steps, 50% deletes, batched cross-term). KNOWN LIMITATION #1 is now CLEARED.
+- Hybrid cost model's "recompute leaves state consistent for a later incremental refresh" — confirmed by an independent reviewer probe (30 seeds × 300 steps forcing incremental↔recompute alternation with deletes and non-linear MAX, oracle-checked every refresh, drained to empty).
+- Oracle/operator separation still intact (no shared code; independent AVG/MIN/MAX value readers), so "317 green" is real evidence.
+
+**✅ TIER-2 OUTER JOINS COMPLETE (Milestone 3.5).** LEFT (`c25d1c2`), then RIGHT + FULL (this session) — each a distinct plan node + operator with an independent from-scratch oracle branch; inner join and LEFT left untouched. All four join types share a uniform output schema (`left_schema + right_non_key`) with a **coalesced (USING-style) key**: an unmatched right row still carries its key value in the shared key column, left non-key columns NULL. Verified: flip-on-match-appear/disappear unit tests, 15-seed random both-sided property tests per join type, and an ADVERSARIAL batched-delta probe (multi-sign deltas at a shared key, NULL-in-data, floats, negatives, weight>1 duplicates) — zero divergence from the oracle. Per the architecture doc's tiers, **tier-2 is now complete.**
+
+DESIGN NOTE (coalesced key): equijoin keys merge into one column (USING semantics), not separate l.k / r.k (ON semantics) — keeps column layout identical across inner/LEFT/RIGHT/FULL, which the SQL front-end depends on. LOGGED representational tie (not a bug): a genuine NULL in a left non-key column produces the same tuple as a NULL pad; oracle and engine treat it identically, so equivalence holds. RIGHT/FULL self-outer-join (one source feeding both sides of an outer join) is NOT separately tested — deferred with inner-join diamond coverage.
 
 ## Milestone 4 — decision point
 

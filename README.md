@@ -19,6 +19,20 @@ eventual home for the shippable library. See the design docs below.
   not a one-sided lookup. 155 tests green: every operator has its own recompute-
   oracle property test, and a two-join + one-aggregate view passes the oracle
   over random insert/delete streams (drained to empty).
+- **Milestone 2 — done.** A real change feed, so the app mutates data instead of
+  hand-feeding deltas. Two adapters, both with the recompute oracle running on
+  the *far side* of the adapter (a capture bug looks exactly like an engine bug):
+  - **In-process mutation log** (`adapters/inproc.py`) — pure stdlib, PK-keyed
+    `insert`/`delete`/`update` (update = delete-old + insert-new); holds the
+    authoritative table contents.
+  - **SQLite adapter** (`adapters/sqlite.py`) — never uses `sqlite3_update_hook`
+    (it misses WITHOUT ROWID tables, ON CONFLICT REPLACE deletes, and
+    truncate-optimized deletes). Primary path is the **session extension via
+    apsw**; a portable **trigger-based changelog** works on stdlib `sqlite3`. All
+    three update-hook blind spots are covered and tested on both backends.
+
+  199 tests green overall (M0+M1 155, in-process log 20, SQLite adapters 24),
+  every maintained view checked against the oracle through the live adapter.
 
 ## The one rule
 
@@ -33,6 +47,12 @@ that assertion isn't running, it isn't IVM.
 python -m pytest tests/ -q
 ```
 
+The SQLite session backend needs [apsw](https://pypi.org/project/apsw/) (its
+wheels ship the `ENABLE_SESSION` + `PREUPDATE_HOOK` compile flags that the Python
+stdlib `sqlite3` lacks): `python -m pip install apsw`. Without it, the session
+tests skip and everything else — including the trigger-based SQLite adapter —
+still runs on the standard library alone.
+
 ## Layout
 
 ```
@@ -44,10 +64,15 @@ ivm/
   engine.py     # Engine (shared sources) + View (materialized result)
   view.py       # Milestone 0 hand-wired GROUP BY view
   oracle.py     # from-scratch recompute (M0) + eval_plan (M1), tests only
+  adapters/
+    inproc.py   # in-process mutation log (M2)
+    sqlite.py   # SQLite change capture: session (apsw) + trigger backends (M2)
 tests/
   test_oracle_equivalence.py   # M0: hand-wired GROUP BY vs oracle
   test_filter.py test_project.py test_aggregate.py test_join.py
   test_view_integration.py     # two-join + one-aggregate + multi-view
+  test_inproc_adapter.py       # oracle through the in-process mutation log
+  test_sqlite_adapter.py       # oracle through SQLite (both capture backends)
   harness.py                   # the oracle side of every property test
 ```
 

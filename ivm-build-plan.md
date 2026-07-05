@@ -39,6 +39,12 @@ Generalize the toy into a small engine that maintains arbitrary tier-1 views (se
 
 **Done when:** every operator ships with its own property test (incremental equals oracle over random insert/delete streams), and a two-join, one-aggregate view passes the oracle test.
 
+**✅ DONE 2026-07-05.** Filter, Project, Aggregate (COUNT+SUM), bilinear Join, named-column plan API, shared-source engine with multi-view fan-out. 155 tests green (M0 28 + M1 127). Commit `e1f47ee`. Oracle (`eval_plan`) verified to share no code with operators/engine.
+
+**KNOWN LIMITATIONS (must clear before the SQL front-end, which will allow these):**
+1. **Self-joins / diamond plans are NOT trusted.** The engine wires each join's two inputs from disjoint base tables, so a single base delta only ever hits one side of any join and the ΔL⋈ΔR cross-term never arises in tests. A view that joins a table to itself (or a DAG where one stream feeds both sides of a join) needs explicit two-edge propagation to the same join node AND its own property tests before it is trustworthy. A silently-wrong join is the worst-case failure mode — do not enable self-joins until this is tested.
+2. **Oracle recompute cost in tests.** The integration suite recomputes two joins from scratch each step (~7s of the run). Fine now; revisit if streams grow.
+
 ## Milestone 2 — attach it to a real data source
 
 Give the engine a change feed instead of a hand-fed delta stream.

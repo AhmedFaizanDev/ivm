@@ -14,7 +14,7 @@ import random
 import pytest
 
 from ivm.zset import ZSet
-from ivm.plan import Source, Aggregate, Count, Sum, Avg
+from ivm.plan import Source, Aggregate, Count, Sum, Avg, Min, Max
 from ivm.engine import Engine
 
 from harness import add, oracle_result, check_every
@@ -43,6 +43,24 @@ def count_sum_avg_plan():
         Source("t", SCHEMA),
         ("cat",),
         (Count("n"), Sum("total", "amount"), Avg("mean", "amount")),
+    )
+
+
+def min_max_plan():
+    return Aggregate(Source("t", SCHEMA), ("cat",), (Min("lo", "amount"), Max("hi", "amount")))
+
+
+def everything_plan():
+    return Aggregate(
+        Source("t", SCHEMA),
+        ("cat",),
+        (
+            Count("n"),
+            Sum("total", "amount"),
+            Avg("mean", "amount"),
+            Min("lo", "amount"),
+            Max("hi", "amount"),
+        ),
     )
 
 
@@ -109,8 +127,87 @@ def test_avg_group_vanishes_at_zero_count():
     assert view.result() == {}
 
 
+def test_min_max_basic():
+    eng, view = build(min_max_plan())
+    eng.apply("t", ZSet({("a", 5): +1, ("a", 3): +1, ("a", 8): +1}))
+    assert view.result() == {("a", 3, 8): 1}
+
+
+def test_min_max_recover_after_deleting_extremes():
+    """The non-linear case: deleting the current MIN (or MAX) must recover the
+    next extreme from the remaining values — a single accumulator can't do this,
+    so the operator keeps the group's full value multiset."""
+    eng, view = build(min_max_plan())
+    eng.apply("t", ZSet({("a", 5): +1, ("a", 3): +1, ("a", 8): +1}))
+    assert view.result() == {("a", 3, 8): 1}
+    eng.apply("t", ZSet({("a", 3): -1}))  # delete current MIN
+    assert view.result() == {("a", 5, 8): 1}  # MIN recovers to 5
+    eng.apply("t", ZSet({("a", 8): -1}))  # delete current MAX
+    assert view.result() == {("a", 5, 5): 1}  # MAX recovers to 5
+    eng.apply("t", ZSet({("a", 5): -1}))  # last row leaves -> group vanishes
+    assert view.result() == {}
+
+
+def test_min_max_duplicate_values():
+    """A repeated extreme must survive until ALL its copies are deleted."""
+    eng, view = build(min_max_plan())
+    eng.apply("t", ZSet({("a", 3): +2, ("a", 5): +1}))  # two 3's and a 5
+    assert view.result() == {("a", 3, 5): 1}
+    eng.apply("t", ZSet({("a", 3): -1}))  # one 3 remains
+    assert view.result() == {("a", 3, 5): 1}
+    eng.apply("t", ZSet({("a", 3): -1}))  # last 3 gone -> MIN recovers to 5
+    assert view.result() == {("a", 5, 5): 1}
+
+
+@pytest.mark.parametrize("seed", range(8))
+def test_min_max_extreme_deletion_stress(seed):
+    """Deliberately delete the CURRENT min or max most of the time, so the
+    recovery path runs constantly, and check against the oracle."""
+    rng = random.Random(seed)
+    plan = everything_plan()
+    eng, view = build(plan)
+    tables: dict = {}
+    live: list[tuple] = []
+    do_check = check_every(seed)
+
+    def rows_in(cat):
+        return [r for r in live if r[0] == cat]
+
+    step = 0
+    for step in range(300):
+        cats = sorted({r[0] for r in live})
+        r = rng.random()
+        if cats and r < 0.35:  # delete the current MIN of some category
+            target = min(rows_in(rng.choice(cats)), key=lambda x: x[1])
+            live.remove(target)
+            delta = ZSet({target: -1})
+        elif cats and r < 0.70:  # delete the current MAX
+            target = max(rows_in(rng.choice(cats)), key=lambda x: x[1])
+            live.remove(target)
+            delta = ZSet({target: -1})
+        else:  # insert
+            row = (rng.choice(["a", "b", "c"]), rng.randint(0, 9))
+            live.append(row)
+            delta = ZSet({row: +1})
+        eng.apply("t", delta)
+        add(tables, "t", delta)
+        if do_check(step):
+            assert view.result() == oracle_result(plan, tables)
+
+    while live:
+        row = live.pop()
+        delta = ZSet({row: -1})
+        eng.apply("t", delta)
+        add(tables, "t", delta)
+        step += 1
+        if do_check(step):
+            assert view.result() == oracle_result(plan, tables)
+    assert view.result() == {}
+
+
 @pytest.mark.parametrize(
-    "make_plan", [count_plan, sum_plan, combined_plan, avg_plan, count_sum_avg_plan]
+    "make_plan",
+    [count_plan, sum_plan, combined_plan, avg_plan, count_sum_avg_plan, min_max_plan],
 )
 @pytest.mark.parametrize("seed", range(12))
 def test_aggregate_matches_oracle(make_plan, seed):

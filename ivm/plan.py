@@ -64,6 +64,24 @@ class Avg:
 
 
 @dataclass(frozen=True)
+class Min:
+    """MIN(column) for a group. NON-linear: deleting the current minimum must
+    recover the next one, so the operator keeps the group's full value multiset
+    (value -> weight) rather than a single accumulator. Output column `name`."""
+
+    name: str
+    column: str
+
+
+@dataclass(frozen=True)
+class Max:
+    """MAX(column) for a group. Non-linear, same multiset state as Min."""
+
+    name: str
+    column: str
+
+
+@dataclass(frozen=True)
 class Aggregate:
     """GROUP BY `group_by`, computing `aggregates` (Count/Sum) per group.
 

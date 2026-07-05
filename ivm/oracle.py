@@ -52,22 +52,27 @@ def eval_plan(plan, tables):
             key = tuple(row[i] for i in key_idx)
             st = groups.get(key)
             if st is None:
-                st = groups[key] = [0] + [0] * len(specs)
+                st = groups[key] = [0] + [
+                    {} if kind in ("min", "max") else 0 for kind, _ci in specs
+                ]
             st[0] += w
             for i, (kind, ci) in enumerate(specs):
                 if kind in ("sum", "avg"):
                     st[1 + i] += row[ci] * w
+                elif kind in ("min", "max"):
+                    ms = st[1 + i]
+                    val = row[ci]
+                    nw = ms.get(val, 0) + w
+                    if nw == 0:
+                        ms.pop(val, None)
+                    else:
+                        ms[val] = nw
         out_schema = tuple(plan.group_by) + tuple(a.name for a in plan.aggregates)
         acc = {}
         for key, st in groups.items():
             if st[0] == 0:
                 continue
-            values = tuple(
-                st[0]
-                if kind == "count"
-                else (st[1 + i] / st[0] if kind == "avg" else st[1 + i])
-                for i, (kind, ci) in enumerate(specs)
-            )
+            values = tuple(_oracle_agg_value(st, i, kind) for i, (kind, ci) in enumerate(specs))
             acc[key + values] = 1
         return out_schema, ZSet(acc)
 
@@ -106,6 +111,24 @@ def _agg_specs(aggregates, idx):
             specs.append(("sum", idx[a.column]))
         elif isinstance(a, P.Avg):
             specs.append(("avg", idx[a.column]))
+        elif isinstance(a, P.Min):
+            specs.append(("min", idx[a.column]))
+        elif isinstance(a, P.Max):
+            specs.append(("max", idx[a.column]))
         else:
             raise NotImplementedError(f"unknown aggregate {type(a).__name__}")
     return specs
+
+
+def _oracle_agg_value(st, i, kind):
+    """Read aggregate i from a group accumulator [net_weight, slot0, slot1, ...].
+    Independent of the operator's reader — the oracle recomputes from scratch."""
+    if kind == "count":
+        return st[0]
+    if kind == "avg":
+        return st[1 + i] / st[0]
+    if kind == "min":
+        return min(st[1 + i])
+    if kind == "max":
+        return max(st[1 + i])
+    return st[1 + i]  # sum

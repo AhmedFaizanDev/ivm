@@ -73,7 +73,7 @@ class AggregateOp(Operator):
         super().__init__()
         idx = index_of(in_schema)
         self._key_idx = [idx[c] for c in group_by]
-        self._specs = []  # ('count', None) | ('sum', column_index)
+        self._specs = []  # (kind, column_index): count|sum|avg|min|max
         for a in aggregates:
             if isinstance(a, P.Count):
                 self._specs.append(("count", None))
@@ -81,9 +81,18 @@ class AggregateOp(Operator):
                 self._specs.append(("sum", idx[a.column]))
             elif isinstance(a, P.Avg):
                 self._specs.append(("avg", idx[a.column]))
+            elif isinstance(a, P.Min):
+                self._specs.append(("min", idx[a.column]))
+            elif isinstance(a, P.Max):
+                self._specs.append(("max", idx[a.column]))
             else:
                 raise NotImplementedError(f"unknown aggregate {type(a).__name__}")
-        self._groups = {}  # key -> [net_weight, values...]
+        self._groups = {}  # key -> [net_weight, per-aggregate slot...]
+
+    def _fresh(self):
+        # slot 0 is the group's net weight (COUNT); min/max keep a value multiset
+        # {value: weight}, the rest keep a scalar running total.
+        return [0] + [{} if kind in ("min", "max") else 0 for kind, _ci in self._specs]
 
     def _row_for(self, key):
         """The current output row for a group, or None if the group is absent."""
@@ -106,11 +115,19 @@ class AggregateOp(Operator):
             key = tuple(row[i] for i in self._key_idx)
             st = self._groups.get(key)
             if st is None:
-                st = self._groups[key] = [0] + [0] * len(self._specs)
+                st = self._groups[key] = self._fresh()
             st[0] += w
             for i, (kind, ci) in enumerate(self._specs):
                 if kind in ("sum", "avg"):
                     st[1 + i] += row[ci] * w
+                elif kind in ("min", "max"):
+                    ms = st[1 + i]
+                    val = row[ci]
+                    nw = ms.get(val, 0) + w
+                    if nw == 0:
+                        ms.pop(val, None)
+                    else:
+                        ms[val] = nw
             if st[0] == 0:
                 del self._groups[key]
 
@@ -189,6 +206,10 @@ def _agg_value(st, i, kind):
         return st[0]  # COUNT(*) is the group's net weight
     if kind == "avg":
         return st[1 + i] / st[0]  # running sum / count
+    if kind == "min":
+        return min(st[1 + i])  # smallest present value in the multiset
+    if kind == "max":
+        return max(st[1 + i])  # largest present value in the multiset
     return st[1 + i]  # SUM
 
 

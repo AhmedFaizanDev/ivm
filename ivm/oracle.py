@@ -98,6 +98,34 @@ def eval_plan(plan, tables):
                 acc[combined] = acc.get(combined, 0) + lw * rw
         return out_schema, ZSet(acc)
 
+    if isinstance(plan, P.LeftJoin):
+        ls, lz = eval_plan(plan.left, tables)
+        rs, rz = eval_plan(plan.right, tables)
+        lidx = index_of(ls)
+        ridx = index_of(rs)
+        lk = [lidx[c] for c in plan.left_keys]
+        rk = [ridx[c] for c in plan.right_keys]
+        right_keyset = set(plan.right_keys)
+        r_nonkey = [i for i, name in enumerate(rs) if name not in right_keyset]
+        out_schema = tuple(ls) + tuple(rs[i] for i in r_nonkey)
+        pad = (None,) * len(r_nonkey)
+        right_by_key = {}
+        for rrow, rw in rz.items():
+            key = tuple(rrow[i] for i in rk)
+            right_by_key.setdefault(key, []).append((rrow, rw))
+        acc = {}
+        for lrow, lw in lz.items():
+            key = tuple(lrow[i] for i in lk)
+            matches = right_by_key.get(key)
+            if matches:  # inner-join rows for a matched left row
+                for rrow, rw in matches:
+                    combined = lrow + tuple(rrow[i] for i in r_nonkey)
+                    acc[combined] = acc.get(combined, 0) + lw * rw
+            else:  # unmatched left row -> one NULL-padded output
+                padded = lrow + pad
+                acc[padded] = acc.get(padded, 0) + lw
+        return out_schema, ZSet(acc)
+
     raise NotImplementedError(f"oracle has no rule for {type(plan).__name__}")
 
 

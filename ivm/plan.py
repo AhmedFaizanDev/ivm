@@ -104,3 +104,19 @@ class Join:
     right: object
     left_keys: tuple
     right_keys: tuple
+
+
+@dataclass(frozen=True)
+class LeftJoin:
+    """LEFT OUTER equi-join. Every left row appears: combined with each matching
+    right row, or NULL-padded once (right non-key columns = None) when its key has
+    no match. Same output schema as the inner Join. Non-linear: a right-side
+    change that flips a key between "no matches" and "some match" must flip every
+    left row at that key between its padded and matched forms.
+
+    (RIGHT/FULL outer joins are deferred.)"""
+
+    left: object
+    right: object
+    left_keys: tuple
+    right_keys: tuple

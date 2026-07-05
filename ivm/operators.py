@@ -147,7 +147,14 @@ class JoinOp(Operator):
     A left delta joins against the current right state; a right delta against the
     current left state; each side integrates its own delta after emitting. This
     is NOT a one-sided lookup — deletes on either side must retract the exact
-    combined rows they produced, which requires the full opposite-side state."""
+    combined rows they produced, which requires the full opposite-side state.
+
+    This also makes diamonds / self-joins correct (one source feeding both
+    inputs). Propagation is synchronous and depth-first, so the two sides run
+    sequentially; because each side emits against the OTHER side's current state
+    and integrates after, whichever side runs second sees the first's update and
+    contributes the delta-left ⋈ delta-right cross-term exactly once — in either
+    order. Verified in tests/test_self_join.py."""
 
     def __init__(self, left_keys, right_keys, left_schema, right_schema):
         super().__init__()

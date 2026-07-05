@@ -55,7 +55,7 @@ def eval_plan(plan, tables):
                 st = groups[key] = [0] + [0] * len(specs)
             st[0] += w
             for i, (kind, ci) in enumerate(specs):
-                if kind == "sum":
+                if kind in ("sum", "avg"):
                     st[1 + i] += row[ci] * w
         out_schema = tuple(plan.group_by) + tuple(a.name for a in plan.aggregates)
         acc = {}
@@ -63,7 +63,9 @@ def eval_plan(plan, tables):
             if st[0] == 0:
                 continue
             values = tuple(
-                st[0] if kind == "count" else st[1 + i]
+                st[0]
+                if kind == "count"
+                else (st[1 + i] / st[0] if kind == "avg" else st[1 + i])
                 for i, (kind, ci) in enumerate(specs)
             )
             acc[key + values] = 1
@@ -102,6 +104,8 @@ def _agg_specs(aggregates, idx):
             specs.append(("count", None))
         elif isinstance(a, P.Sum):
             specs.append(("sum", idx[a.column]))
+        elif isinstance(a, P.Avg):
+            specs.append(("avg", idx[a.column]))
         else:
             raise NotImplementedError(f"unknown aggregate {type(a).__name__}")
     return specs

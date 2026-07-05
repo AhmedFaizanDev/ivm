@@ -14,7 +14,7 @@ import random
 import pytest
 
 from ivm.zset import ZSet
-from ivm.plan import Source, Aggregate, Count, Sum
+from ivm.plan import Source, Aggregate, Count, Sum, Avg
 from ivm.engine import Engine
 
 from harness import add, oracle_result, check_every
@@ -32,6 +32,18 @@ def sum_plan():
 
 def combined_plan():
     return Aggregate(Source("t", SCHEMA), ("cat",), (Count("n"), Sum("total", "amount")))
+
+
+def avg_plan():
+    return Aggregate(Source("t", SCHEMA), ("cat",), (Avg("mean", "amount"),))
+
+
+def count_sum_avg_plan():
+    return Aggregate(
+        Source("t", SCHEMA),
+        ("cat",),
+        (Count("n"), Sum("total", "amount"), Avg("mean", "amount")),
+    )
 
 
 def build(plan):
@@ -72,7 +84,34 @@ def test_batch_delta_touching_two_groups():
     assert view.result() == {("a", 2, 6): 1, ("c", 1, 4): 1}
 
 
-@pytest.mark.parametrize("make_plan", [count_plan, sum_plan, combined_plan])
+def test_avg_single_group():
+    eng, view = build(avg_plan())
+    eng.apply("t", ZSet({("a", 5): +1}))
+    eng.apply("t", ZSet({("a", 3): +1}))
+    assert view.result() == {("a", 4.0): 1}  # (5+3)/2
+
+
+def test_avg_recovers_after_delete():
+    """AVG keeps sum and count separately; deleting a row must move the mean."""
+    eng, view = build(count_sum_avg_plan())
+    eng.apply("t", ZSet({("a", 5): +1}))
+    eng.apply("t", ZSet({("a", 3): +1}))
+    eng.apply("t", ZSet({("a", 10): +1}))
+    assert view.result() == {("a", 3, 18, 6.0): 1}  # count 3, sum 18, avg 6.0
+    eng.apply("t", ZSet({("a", 10): -1}))
+    assert view.result() == {("a", 2, 8, 4.0): 1}  # count 2, sum 8, avg 4.0
+
+
+def test_avg_group_vanishes_at_zero_count():
+    eng, view = build(avg_plan())
+    eng.apply("t", ZSet({("a", 5): +1}))
+    eng.apply("t", ZSet({("a", 5): -1}))
+    assert view.result() == {}
+
+
+@pytest.mark.parametrize(
+    "make_plan", [count_plan, sum_plan, combined_plan, avg_plan, count_sum_avg_plan]
+)
 @pytest.mark.parametrize("seed", range(12))
 def test_aggregate_matches_oracle(make_plan, seed):
     rng = random.Random(seed)

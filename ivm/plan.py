@@ -54,6 +54,16 @@ class Sum:
 
 
 @dataclass(frozen=True)
+class Avg:
+    """AVG(column) for a group = SUM(column) / COUNT(*). Linear: keeps a running
+    sum alongside the group's net weight (count) and divides at read time.
+    Output column `name`."""
+
+    name: str
+    column: str
+
+
+@dataclass(frozen=True)
 class Aggregate:
     """GROUP BY `group_by`, computing `aggregates` (Count/Sum) per group.
 

@@ -79,6 +79,8 @@ class AggregateOp(Operator):
                 self._specs.append(("count", None))
             elif isinstance(a, P.Sum):
                 self._specs.append(("sum", idx[a.column]))
+            elif isinstance(a, P.Avg):
+                self._specs.append(("avg", idx[a.column]))
             else:
                 raise NotImplementedError(f"unknown aggregate {type(a).__name__}")
         self._groups = {}  # key -> [net_weight, values...]
@@ -88,10 +90,7 @@ class AggregateOp(Operator):
         st = self._groups.get(key)
         if st is None:
             return None
-        values = tuple(
-            st[0] if kind == "count" else st[1 + i]
-            for i, (kind, ci) in enumerate(self._specs)
-        )
+        values = tuple(_agg_value(st, i, kind) for i, (kind, ci) in enumerate(self._specs))
         return key + values
 
     def on_input(self, delta):
@@ -110,7 +109,7 @@ class AggregateOp(Operator):
                 st = self._groups[key] = [0] + [0] * len(self._specs)
             st[0] += w
             for i, (kind, ci) in enumerate(self._specs):
-                if kind == "sum":
+                if kind in ("sum", "avg"):
                     st[1 + i] += row[ci] * w
             if st[0] == 0:
                 del self._groups[key]
@@ -182,6 +181,15 @@ def _integrate(index, key_idx, delta):
                 del index[key]
         else:
             bucket[row] = new
+
+
+def _agg_value(st, i, kind):
+    """Read aggregate i's value from a group accumulator [net_weight, v0, v1, ...]."""
+    if kind == "count":
+        return st[0]  # COUNT(*) is the group's net weight
+    if kind == "avg":
+        return st[1 + i] / st[0]  # running sum / count
+    return st[1 + i]  # SUM
 
 
 def compile_plan(node, engine):

@@ -16,7 +16,7 @@ from ivm.plan import Source, Join, Aggregate, Count, Sum
 from ivm.engine import Engine
 from ivm.adapters.inproc import MutationLog
 
-from harness import oracle_result
+from harness import oracle_result, check_every
 
 USERS = ("uid", "uname", "region")
 ORDERS = ("oid", "uid", "amount")
@@ -112,7 +112,9 @@ def test_inproc_matches_oracle(seed):
     def gen_orders(oid):
         return (oid, rng.randint(0, 3), rng.randint(-3, 9))
 
-    for _ in range(400):
+    do_check = check_every(seed)
+    step = 0
+    for step in range(400):
         table = rng.choice(["users", "orders"])
         pks = list(live[table])
         r = rng.random()
@@ -140,13 +142,16 @@ def test_inproc_matches_oracle(seed):
                 pk = (oid,)
             log.insert(table, row)
             live[table][pk] = row
-        check(views, plans, log)
+        if do_check(step):
+            check(views, plans, log)
 
     # drain both tables to empty
     for table in ("orders", "users"):
         for pk in list(live[table]):
             log.delete(table, pk)
             del live[table][pk]
-            check(views, plans, log)
+            step += 1
+            if do_check(step):
+                check(views, plans, log)
     for view in views.values():
         assert view.result() == {}

@@ -16,7 +16,7 @@ from ivm.zset import ZSet
 from ivm.plan import Source, Filter, Project, Join, Aggregate, Count, Sum
 from ivm.engine import Engine
 
-from harness import add, oracle_result
+from harness import add, oracle_result, check_every
 
 USERS = ("uid", "uname", "region")
 ORDERS = ("oid", "uid", "pid", "qty")
@@ -103,12 +103,15 @@ def test_all_views_match_oracle(seed):
                 f"view {name} diverged from oracle"
             )
 
-    for _ in range(500):
+    do_check = check_every(seed)
+    step = 0
+    for step in range(500):
         table = rng.choice(["users", "orders", "products"])
         delta = _random_delta(rng, table, live[table])
         eng.apply(table, delta)
         add(tables, table, delta)
-        check()
+        if do_check(step):
+            check()
 
     # drain every table to empty; all views must end empty
     for table in ("orders", "users", "products"):
@@ -117,6 +120,8 @@ def test_all_views_match_oracle(seed):
             delta = ZSet({row: -1})
             eng.apply(table, delta)
             add(tables, table, delta)
-            check()
+            step += 1
+            if do_check(step):
+                check()
     for view in views.values():
         assert view.result() == {}

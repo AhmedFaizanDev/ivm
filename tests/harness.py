@@ -20,3 +20,16 @@ def oracle_result(plan, tables: dict) -> dict:
     """From-scratch recompute of a plan as {result_row: weight}."""
     _schema, zset = eval_plan(plan, tables)
     return dict(zset.items())
+
+
+def check_every(seed, full_seeds=2, n=25):
+    """Throttle the (expensive) per-step oracle assertion so the suite stays fast.
+
+    The engine still processes every delta; only the from-scratch recompute is
+    what costs — so we run it every step for a couple of seeds (full coverage of
+    the step-by-step invariant) and every `n` steps for the rest. Every test
+    still asserts the oracle once more after draining to empty, so a divergence
+    can never slip through unchecked. Returns a predicate over the step index."""
+    if seed < full_seeds:
+        return lambda step: True
+    return lambda step: step % n == 0

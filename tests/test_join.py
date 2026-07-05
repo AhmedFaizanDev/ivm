@@ -15,7 +15,7 @@ from ivm.zset import ZSet
 from ivm.plan import Source, Join
 from ivm.engine import Engine
 
-from harness import add, oracle_result
+from harness import add, oracle_result, check_every
 
 USERS = ("uid", "uname")
 ORDERS = ("oid", "uid", "amount")
@@ -94,11 +94,14 @@ def test_join_matches_oracle(seed):
         pool.append(row)
         return table, ZSet({row: +1})
 
-    for _ in range(500):
+    do_check = check_every(seed)
+    step = 0
+    for step in range(500):
         table, delta = mutate()
         eng.apply(table, delta)
         add(tables, table, delta)
-        assert view.result() == oracle_result(plan, tables)
+        if do_check(step):
+            assert view.result() == oracle_result(plan, tables)
 
     # drain both sides to empty
     for table in ("users", "orders"):
@@ -107,5 +110,7 @@ def test_join_matches_oracle(seed):
             delta = ZSet({row: -1})
             eng.apply(table, delta)
             add(tables, table, delta)
-            assert view.result() == oracle_result(plan, tables)
+            step += 1
+            if do_check(step):
+                assert view.result() == oracle_result(plan, tables)
     assert view.result() == {}

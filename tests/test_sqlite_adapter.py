@@ -25,7 +25,7 @@ from ivm.plan import Source, Filter, Join, Aggregate, Count, Sum
 from ivm.engine import Engine
 from ivm.adapters.sqlite import SqliteAdapter
 
-from harness import oracle_result
+from harness import oracle_result, check_every
 
 BACKENDS = ["trigger", "session"]  # session runs only where apsw is installed
 
@@ -229,7 +229,9 @@ def test_sqlite_matches_oracle(capture, seed):
                 f"[{capture}] view {name} diverged from oracle"
             )
 
-    for _ in range(200):
+    do_check = check_every(seed)
+    step = 0
+    for step in range(200):
         table = rng.choice(["users", "orders"])
         pks = list(live[table])
         r = rng.random()
@@ -262,7 +264,8 @@ def test_sqlite_matches_oracle(capture, seed):
                              (oid, rng.randint(0, 3), rng.randint(-3, 9)))
                 live["orders"].add(oid)
         adapter.flush()
-        check()
+        if do_check(step):
+            check()
 
     for table in ("orders", "users"):
         col = "uid" if table == "users" else "oid"

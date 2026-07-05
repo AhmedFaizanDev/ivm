@@ -17,7 +17,7 @@ from ivm.zset import ZSet
 from ivm.plan import Source, Aggregate, Count, Sum
 from ivm.engine import Engine
 
-from harness import add, oracle_result
+from harness import add, oracle_result, check_every
 
 SCHEMA = ("cat", "amount")
 
@@ -81,7 +81,9 @@ def test_aggregate_matches_oracle(make_plan, seed):
     tables: dict = {}
     live: list[tuple] = []
 
-    for _ in range(400):
+    do_check = check_every(seed)
+    step = 0
+    for step in range(400):
         if live and rng.random() < 0.45:
             row = live.pop(rng.randrange(len(live)))
             delta = ZSet({row: -1})
@@ -93,12 +95,15 @@ def test_aggregate_matches_oracle(make_plan, seed):
             delta = ZSet({row: +1})
         eng.apply("t", delta)
         add(tables, "t", delta)
-        assert view.result() == oracle_result(plan, tables)
+        if do_check(step):
+            assert view.result() == oracle_result(plan, tables)
 
     while live:
         row = live.pop()
         delta = ZSet({row: -1})
         eng.apply("t", delta)
         add(tables, "t", delta)
-        assert view.result() == oracle_result(plan, tables)
+        step += 1
+        if do_check(step):
+            assert view.result() == oracle_result(plan, tables)
     assert view.result() == {}

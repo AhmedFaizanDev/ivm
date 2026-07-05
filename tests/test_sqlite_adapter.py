@@ -21,7 +21,7 @@ import sqlite3
 
 import pytest
 
-from ivm.plan import Source, Join, Aggregate, Count, Sum
+from ivm.plan import Source, Filter, Join, Aggregate, Count, Sum
 from ivm.engine import Engine
 from ivm.adapters.sqlite import SqliteAdapter
 
@@ -116,6 +116,57 @@ def test_without_rowid_table_is_captured(capture):
     conn.execute("DELETE FROM wt WHERE k = 'x'")
     adapter.flush()
     assert view.result() == {("a", 1, 3): 1}
+    assert view.result() == oracle_result(plan, adapter.all_contents())
+
+
+# --- non-integer column types (native value fidelity) -------------------------
+
+
+@pytest.mark.parametrize("capture", BACKENDS)
+def test_real_column_no_float_drift(capture):
+    """A REAL column must round-trip through capture bit-for-bit. If capture
+    serializes reals lossily (e.g. via JSON), the captured delta row carries a
+    rounded amount that never cancels against the native row `contents()` reads,
+    and the view silently diverges from the oracle — the exact silent-wrong
+    answer this project exists to prevent."""
+    conn = open_db(capture)
+    conn.execute("CREATE TABLE m(id INTEGER PRIMARY KEY, amount REAL)")
+    eng = Engine()
+    plan = Filter(Source("m", ("id", "amount")), lambda r: True)  # keep every row
+    view = eng.add_view("all_m", plan)
+    adapter = SqliteAdapter(eng, conn, capture=capture)
+    adapter.register("m", ("id", "amount"), ("id",))
+
+    amounts = [0.1, 0.2, 0.1 + 0.2, 1.0 / 3.0, 2.675, -0.0]
+    for i, v in enumerate(amounts):
+        conn.execute("INSERT INTO m VALUES(?, ?)", (i, v))
+    adapter.flush()
+    assert view.result() == oracle_result(plan, adapter.all_contents())
+
+    conn.execute("UPDATE m SET amount = ? WHERE id = 2", (9.9,))
+    adapter.flush()
+    assert view.result() == oracle_result(plan, adapter.all_contents())
+
+
+@pytest.mark.parametrize("capture", BACKENDS)
+def test_blob_column_matches_oracle(capture):
+    """A BLOB column must be captured as raw bytes. JSON-based capture crashes on
+    BLOBs ('JSON cannot hold BLOB values'); native capture round-trips them."""
+    conn = open_db(capture)
+    conn.execute("CREATE TABLE b(id INTEGER PRIMARY KEY, data BLOB)")
+    eng = Engine()
+    plan = Filter(Source("b", ("id", "data")), lambda r: True)
+    view = eng.add_view("all_b", plan)
+    adapter = SqliteAdapter(eng, conn, capture=capture)
+    adapter.register("b", ("id", "data"), ("id",))
+
+    conn.execute("INSERT INTO b VALUES(?, ?)", (1, b"\x00\x01\x02"))
+    conn.execute("INSERT INTO b VALUES(?, ?)", (2, b"hello"))
+    adapter.flush()
+    assert view.result() == oracle_result(plan, adapter.all_contents())
+
+    conn.execute("DELETE FROM b WHERE id = 1")
+    adapter.flush()
     assert view.result() == oracle_result(plan, adapter.all_contents())
 
 

@@ -6,20 +6,22 @@ misses WITHOUT ROWID tables, ON CONFLICT REPLACE deletes, and truncate-optimized
 values:
 
   * capture="trigger" (portable, stdlib): AFTER INSERT/UPDATE/DELETE triggers
-    record the full OLD/NEW rows into a changelog table. A row trigger disables
-    the truncate optimization, and `PRAGMA recursive_triggers=ON` makes REPLACE
-    fire its delete trigger — so all three blind spots are covered.
+    record the full OLD/NEW rows into a per-table changelog. A row trigger
+    disables the truncate optimization, and `PRAGMA recursive_triggers=ON` makes
+    REPLACE fire its delete trigger — so all three blind spots are covered. The
+    changelog stores column values NATIVELY (BLOB-affinity columns, no JSON): a
+    REAL keeps its exact double (no float drift) and a BLOB round-trips, so
+    captured deltas cancel bit-for-bit against the rows `contents()` reads back.
   * capture="session" (primary, apsw): the SQLite session extension's row-level
-    changesets. Built in the next task.
+    changesets, with native values.
+
+Caveat (choose knowingly): triggers capture writes from ANY connection to the
+database; the session backend only sees writes on its OWN connection.
 
 The database is the source of truth: `contents()` reads it back with `SELECT *`,
 so the recompute oracle runs over the real table, not a shadow copy."""
 
-import json
-
 from ivm.zset import ZSet
-
-CHANGELOG = "_ivm_changelog"
 
 
 class SqliteAdapter:
@@ -70,56 +72,71 @@ class SqliteAdapter:
     # --- trigger backend ------------------------------------------------------
 
     def _setup_trigger_store(self):
-        # REPLACE-induced deletes only fire delete triggers with this on.
+        # REPLACE-induced deletes only fire delete triggers with this on. The
+        # per-table changelogs themselves are created in register().
         self._exec("PRAGMA recursive_triggers = ON")
-        self._exec(
-            f"CREATE TABLE IF NOT EXISTS {CHANGELOG}("
-            "seq INTEGER PRIMARY KEY AUTOINCREMENT, "
-            "tbl TEXT NOT NULL, op TEXT NOT NULL, oldvals TEXT, newvals TEXT)"
-        )
+
+    @staticmethod
+    def _changelog_name(table):
+        return f"_ivm_log_{table}"
 
     def _install_triggers(self, table, schema):
-        new = ", ".join(f'NEW."{c}"' for c in schema)
-        old = ", ".join(f'OLD."{c}"' for c in schema)
+        log = self._changelog_name(table)
+        n = len(schema)
+        old_cols = [f"o{i}" for i in range(n)]
+        new_cols = [f"n{i}" for i in range(n)]
+        # Value columns are declared with NO type -> BLOB affinity, so SQLite
+        # stores each value in its original storage class without coercion:
+        # a REAL stays an exact double, a BLOB stays bytes. No JSON anywhere.
+        val_defs = ", ".join(f'"{c}"' for c in old_cols + new_cols)
+        self._exec(
+            f'CREATE TABLE IF NOT EXISTS "{log}"('
+            f"seq INTEGER PRIMARY KEY AUTOINCREMENT, op TEXT NOT NULL, {val_defs})"
+        )
+        new_src = ", ".join(f'NEW."{c}"' for c in schema)
+        old_src = ", ".join(f'OLD."{c}"' for c in schema)
+        new_tgt = ", ".join(f'"{c}"' for c in new_cols)
+        old_tgt = ", ".join(f'"{c}"' for c in old_cols)
         self._exec(
             f'CREATE TRIGGER IF NOT EXISTS "_ivm_{table}_ins" AFTER INSERT ON "{table}" BEGIN '
-            f"INSERT INTO {CHANGELOG}(tbl, op, newvals) "
-            f"VALUES('{table}', 'I', json_array({new})); END"
+            f'INSERT INTO "{log}"(op, {new_tgt}) VALUES(\'I\', {new_src}); END'
         )
         self._exec(
             f'CREATE TRIGGER IF NOT EXISTS "_ivm_{table}_del" AFTER DELETE ON "{table}" BEGIN '
-            f"INSERT INTO {CHANGELOG}(tbl, op, oldvals) "
-            f"VALUES('{table}', 'D', json_array({old})); END"
+            f'INSERT INTO "{log}"(op, {old_tgt}) VALUES(\'D\', {old_src}); END'
         )
         self._exec(
             f'CREATE TRIGGER IF NOT EXISTS "_ivm_{table}_upd" AFTER UPDATE ON "{table}" BEGIN '
-            f"INSERT INTO {CHANGELOG}(tbl, op, oldvals, newvals) "
-            f"VALUES('{table}', 'U', json_array({old}), json_array({new})); END"
+            f'INSERT INTO "{log}"(op, {old_tgt}, {new_tgt}) VALUES(\'U\', {old_src}, {new_src}); END'
         )
 
     def _flush_trigger(self):
+        for table, meta in self._tables.items():
+            self._drain_changelog(table, len(meta["schema"]))
+
+    def _drain_changelog(self, table, n):
+        log = self._changelog_name(table)
+        old_cols = ", ".join(f'"o{i}"' for i in range(n))
+        new_cols = ", ".join(f'"n{i}"' for i in range(n))
         rows = self._query(
-            f"SELECT seq, tbl, op, oldvals, newvals FROM {CHANGELOG} ORDER BY seq"
+            f'SELECT seq, op, {old_cols}, {new_cols} FROM "{log}" ORDER BY seq'
         )
         if not rows:
             return
-        deltas = {}  # table -> {row: weight}
-        for _seq, tbl, op, oldvals, newvals in rows:
-            d = deltas.setdefault(tbl, {})
+        delta = {}  # row -> weight
+        for r in rows:
+            op = r[1]
+            old_row = tuple(r[2 : 2 + n])
+            new_row = tuple(r[2 + n : 2 + 2 * n])
             if op == "I":
-                row = tuple(json.loads(newvals))
-                d[row] = d.get(row, 0) + 1
+                delta[new_row] = delta.get(new_row, 0) + 1
             elif op == "D":
-                row = tuple(json.loads(oldvals))
-                d[row] = d.get(row, 0) - 1
+                delta[old_row] = delta.get(old_row, 0) - 1
             else:  # "U" -> delete-old + insert-new
-                old = tuple(json.loads(oldvals))
-                nw = tuple(json.loads(newvals))
-                d[old] = d.get(old, 0) - 1
-                d[nw] = d.get(nw, 0) + 1
-        self._exec(f"DELETE FROM {CHANGELOG} WHERE seq <= ?", (rows[-1][0],))
-        for tbl, d in deltas.items():
-            self._engine.apply(tbl, ZSet(d))
+                delta[old_row] = delta.get(old_row, 0) - 1
+                delta[new_row] = delta.get(new_row, 0) + 1
+        self._exec(f'DELETE FROM "{log}" WHERE seq <= ?', (rows[-1][0],))
+        self._engine.apply(table, ZSet(delta))
 
     # --- session backend (apsw) -----------------------------------------------
 

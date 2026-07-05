@@ -131,6 +131,10 @@ Headline (CPython, 50k-row base; full data in `bench/results.json`):
 
 **HONEST FINDING (feeds the paper + future work):** the experimental cost model's naive heuristic (changed-rows ÷ base-rows) tracks cost for aggregates but FAILS for joins — it stayed "incremental" at batch=2000 where recompute was 1.5× faster, because a join's cost is driven by OUTPUT amplification (input × per-key fan-out), not input size. A fan-out-aware cost estimate is the clear next step. This is precisely why the cost model was labelled experimental/unvalidated — and the benchmark now demonstrates the gap concretely.
 
+## Paper outline (`docs/paper-outline.md`) — ✅ DONE (this session)
+
+A populated spine (not the paper): title/abstract drafts, three contributions (embeddable in-process IVM library; differential-testing correctness methodology; empirical incremental-vs-recompute study with the honest cost-model negative result), positioning table vs the related-work survey, methodology, an evaluation plan filled with the real benchmark numbers, limitations, and CANDIDATE venue types — CIDR (systems + demo), **DBTest** (VLDB testing workshop, best fit for the correctness-methodology lead), and SIGMOD/VLDB demo track. Venue choice is deferred to the professor (not committed).
+
 ## Milestone 4 — decision point
 
 You now have a correct, tested tier-1/2 engine. Choose a direction with your professor:

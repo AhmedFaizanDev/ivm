@@ -33,6 +33,20 @@ eventual home for the shippable library. See the design docs below.
 
   199 tests green overall (M0+M1 155, in-process log 20, SQLite adapters 24),
   every maintained view checked against the oracle through the live adapter.
+- **Milestone 3 — in progress (tier-2 correctness).**
+  - **AVG** (running sum + count, divide at read) and **MIN/MAX** with correct
+    delete-recovery — the non-linear case, done by keeping each group's full
+    value multiset so deleting the current extreme recovers the next one.
+  - **Deletes-in-joins hardened** and **self-joins / diamonds cleared**: one
+    source may now feed both inputs of a join; the `ΔL⋈ΔR` cross-term is handled
+    exactly once in either propagation order (property-tested).
+  - **Hybrid cost model** (`cost_model.py`, *experimental*): per refresh, pick
+    incremental vs. full recompute by a size-ratio heuristic and fall back to
+    recompute on bulk updates — both paths are oracle-checked. Kept outside the
+    validated core on purpose.
+  - Trigger-backend capture rewritten to a **native-typed changelog** (fixes
+    silent float drift and the BLOB crash the JSON changelog had).
+  - 317 tests green overall.
 
 ## The one rule
 
@@ -64,6 +78,7 @@ ivm/
   engine.py     # Engine (shared sources) + View (materialized result)
   view.py       # Milestone 0 hand-wired GROUP BY view
   oracle.py     # from-scratch recompute (M0) + eval_plan (M1), tests only
+  cost_model.py # experimental hybrid incremental-vs-recompute wrapper (M3)
   adapters/
     inproc.py   # in-process mutation log (M2)
     sqlite.py   # SQLite change capture: session (apsw) + trigger backends (M2)
@@ -71,8 +86,10 @@ tests/
   test_oracle_equivalence.py   # M0: hand-wired GROUP BY vs oracle
   test_filter.py test_project.py test_aggregate.py test_join.py
   test_view_integration.py     # two-join + one-aggregate + multi-view
+  test_join_deletes.py test_self_join.py   # M3 join hardening + self-joins
   test_inproc_adapter.py       # oracle through the in-process mutation log
   test_sqlite_adapter.py       # oracle through SQLite (both capture backends)
+  test_cost_model.py           # M3 hybrid cost model, both paths vs oracle
   harness.py                   # the oracle side of every property test
 ```
 

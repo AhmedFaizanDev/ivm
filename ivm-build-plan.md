@@ -98,6 +98,12 @@ A hand-written, zero-dependency SELECT-subset compiler (`ivm/sql.py`) turns SQL 
 - LOGGED limitations: identifiers are case-SENSITIVE (must match the catalog); no `HAVING`/`ORDER BY`/`DISTINCT`/subqueries/`SELECT`-arithmetic; self-join via SQL is blocked by the plan's unique-column-name rule; a GROUP BY-less GLOBAL aggregate over an EMPTY relation yields no row (SQL yields a zero row) — the standard incremental-aggregate boundary.
 - TDD honesty note: the parser/compiler is one cohesive unit. Cycle-1 (projection/filter) was built failing-test-first and caught a real alias bug (getter read the alias, not the source column). Aggregates and joins were then added and verified by the oracle-equivalence + SQLite cross-check rather than one-failing-test-per-grammar-clause.
 
+## Perf / state-size baselines (Rust-port targets) — this session
+
+Recorded so the eventual Rust port has numbers to beat (`tests/test_state_size.py`):
+- **State is LINEAR and LEAK-FREE.** A join retains exactly one index entry per input row per side; an aggregate keeps one group per live key (MIN/MAX additionally keep a per-group value multiset). After draining every row, all operator state returns to empty — verified whitebox for all four join kinds and a COUNT+SUM+MIN+MAX aggregate. This is the guard against Materialize-style state blow-up.
+- **Throughput (CPython prototype): ~115,000 single-row deltas/sec** through a `GROUP BY` view (40k insert+delete deltas in ~0.35 s, one Engine, one view). Unoptimized — the Python baseline; the Rust port should beat it by orders of magnitude. Full suite: ~570 tests in <10 s (property checks throttled via `check_every`), and CI is green on Python 3.10/3.11/3.12.
+
 ## Milestone 4 — decision point
 
 You now have a correct, tested tier-1/2 engine. Choose a direction with your professor:

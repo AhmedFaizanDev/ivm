@@ -90,6 +90,14 @@ This is where IVM stops being a toy.
 
 DESIGN NOTE (coalesced key): equijoin keys merge into one column (USING semantics), not separate l.k / r.k (ON semantics) — keeps column layout identical across inner/LEFT/RIGHT/FULL, which the SQL front-end depends on. LOGGED representational tie (not a bug): a genuine NULL in a left non-key column produces the same tuple as a NULL pad; oracle and engine treat it identically, so equivalence holds. RIGHT/FULL self-outer-join (one source feeding both sides of an outer join) is NOT separately tested — deferred with inner-join diamond coverage.
 
+## SQL front-end — ✅ DONE (this session)
+
+A hand-written, zero-dependency SELECT-subset compiler (`ivm/sql.py`) turns SQL into the plan API — the feature that makes this "an IVM library you write SQL against." Design note: `ivm-sql-frontend.md`.
+- Supports: `SELECT` (columns / aggregates / `*`), `FROM t [alias]`, `[INNER|LEFT|RIGHT|FULL [OUTER]] JOIN … ON a.k=b.k [AND …]`, `WHERE` (`= != <> < <= > >=`, `IS [NOT] NULL`, `AND`/`OR`, parens, literals incl. negatives), `GROUP BY` + `COUNT/SUM/AVG/MIN/MAX`. Plus `engine.add_sql_view(name, sql, catalog)` sugar.
+- Verified THREE ways: (1) compiled plan == recompute oracle of the trusted hand-built plan over random insert/delete streams; (2) an INDEPENDENT SQL-semantics oracle — the same SQL run in stdlib SQLite matches the maintained view (projection / filter / grouped-agg / all four join kinds; RIGHT/FULL via `COALESCE` to match our coalesced key); (3) adversarial edge probes (NULL-in-WHERE excluded not crashing, `IS NULL`, parens, lowercase keywords, negative literals, unknown-column/table errors). ~126 SQL tests.
+- LOGGED limitations: identifiers are case-SENSITIVE (must match the catalog); no `HAVING`/`ORDER BY`/`DISTINCT`/subqueries/`SELECT`-arithmetic; self-join via SQL is blocked by the plan's unique-column-name rule; a GROUP BY-less GLOBAL aggregate over an EMPTY relation yields no row (SQL yields a zero row) — the standard incremental-aggregate boundary.
+- TDD honesty note: the parser/compiler is one cohesive unit. Cycle-1 (projection/filter) was built failing-test-first and caught a real alias bug (getter read the alias, not the source column). Aggregates and joins were then added and verified by the oracle-equivalence + SQLite cross-check rather than one-failing-test-per-grammar-clause.
+
 ## Milestone 4 — decision point
 
 You now have a correct, tested tier-1/2 engine. Choose a direction with your professor:

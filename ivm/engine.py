@@ -43,6 +43,13 @@ class Engine:
         self._views[name] = view
         return view
 
+    def add_sql_view(self, name, sql, catalog):
+        """Compile a SELECT against a catalog {table: schema} and register the
+        maintained view. Sugar for add_view(name, compile_sql(sql, catalog))."""
+        from ivm.sql import compile_sql
+
+        return self.add_view(name, compile_sql(sql, catalog))
+
     def apply(self, table, delta):
         """Feed a base-table delta; it fans out to every view reading `table`."""
         src = self._sources.get(table)

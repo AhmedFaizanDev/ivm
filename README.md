@@ -76,8 +76,8 @@ operators. Every operator, adapter, and SQL query is checked by asserting
 drained to empty, with deletes and empty groups always exercised. The SQL
 front-end is additionally cross-checked against **real SQLite**.
 
-**558+ tests, green.** When a change makes an oracle test red, that's the product
-telling you it's wrong.
+**570 tests, green** (CI on Python 3.10–3.12). When a change makes an oracle test
+red, that's the product telling you it's wrong.
 
 ## Install
 

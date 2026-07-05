@@ -2,6 +2,8 @@
 
 *A proposed design and a phased plan. Last updated June 2026.*
 
+> **Implementation status (2026-07).** The Python prototype now realizes all three layers below: the delta-algebra core (Z-set + differential operators), a **working SQL-to-plan compiler** (Layer 2 — `ivm/sql.py`), and change-capture adapters (in-process log + SQLite session/trigger). SQL coverage tiers 1 and 2 are complete and oracle-verified (filter/project, inner + LEFT/RIGHT/FULL joins, COUNT/SUM/AVG/MIN/MAX), plus an experimental hybrid cost model. Serialization/compaction and the Rust port remain future work. See `ivm-build-plan.md` for the honest, commit-by-commit status and `README.md` to run it.
+
 ## Goal and non-goals
 
 **Goal.** A library you link into an application (Rust core with bindings, in the style of SQLite or DuckDB) that, given a declared SQL view and a stream of changes to its base tables, keeps the view current by applying only the deltas, with no external service.

@@ -120,6 +120,17 @@ Higher SQL coverage, TDD.
 - Verified against **stdlib SQLite** (independent semantics oracle) over random insert/delete streams for DISTINCT (incl. with WHERE) and HAVING (COUNT/SUM, alias and `COUNT(*)` forms, `AND` with a group-column predicate). ~50 new tests.
 - LOGGED v1 limitation: a HAVING aggregate must also appear in SELECT (else a clear error). `COUNT(col)` is treated as `COUNT(*)` (pre-existing).
 
+## Benchmark / evaluation harness (`bench/`) — ✅ DONE (this session)
+
+`python bench/benchmark.py` (stdlib-only, one command, writes `bench/results.json`; `--quick` for a fast pass). Measures throughput, update-latency percentiles, state size, and the incremental-vs-full-recompute speedup curve vs batch size (the money graph), for BOTH a grouped aggregate and a fan-out join. Smoke-tested (`test_bench_smoke.py`).
+
+Headline (CPython, 50k-row base; full data in `bench/results.json`):
+- Throughput ~37k single-row deltas/sec through a 6-aggregate GROUP BY view; update latency **p50 21µs / p99 43µs**.
+- State size: aggregate view ~**0.2 bytes/row** (O(distinct groups)); join view ~**31 bytes/input-row** (O(rows) — retains both indexes; the honest per-record overhead for the Rust port, cf. the Materialize 0–16 bytes target).
+- MONEY GRAPH — aggregate: incremental is **~3,600× faster** than full recompute at batch=1, ~33× at 2% of base, and still 1.5× at 100% (recompute never really wins for a cheap aggregate, so the cost model flipping to recompute at 100% is slightly over-eager). Join with fan-out: incremental wins 12× at batch=1 but **LOSES on bulk** (0.68× at 2000 rows; crossover ≈ batch 500) — recompute genuinely wins there.
+
+**HONEST FINDING (feeds the paper + future work):** the experimental cost model's naive heuristic (changed-rows ÷ base-rows) tracks cost for aggregates but FAILS for joins — it stayed "incremental" at batch=2000 where recompute was 1.5× faster, because a join's cost is driven by OUTPUT amplification (input × per-key fan-out), not input size. A fan-out-aware cost estimate is the clear next step. This is precisely why the cost model was labelled experimental/unvalidated — and the benchmark now demonstrates the gap concretely.
+
 ## Milestone 4 — decision point
 
 You now have a correct, tested tier-1/2 engine. Choose a direction with your professor:

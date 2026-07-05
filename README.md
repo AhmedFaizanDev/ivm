@@ -107,6 +107,19 @@ python -m pip install -e ".[dev]"
 python -m pytest -q
 ```
 
+## Performance (CPython prototype)
+
+`python bench/benchmark.py` (stdlib only; full data in [`bench/results.json`](bench/results.json)). On a 50k-row base:
+
+- **~37,000 single-row updates/sec**; update latency **p50 21µs / p99 43µs**.
+- **Incremental is ~3,600× faster than a full recompute** for a small update to a
+  `GROUP BY` view — ~33× even at 2% of the base changing.
+- For *bulk* updates to a fan-out join, full recompute wins; a cost model
+  (experimental) exists to pick the cheaper path. The benchmark honestly shows
+  the current heuristic doesn't yet catch that join case — future work.
+- Maintained state is O(groups) for aggregates (~0.2 bytes/row) and O(rows) for
+  joins. Python is the validated prototype; Rust is the path to production speed.
+
 ## How it works (one paragraph)
 
 Base-table changes are **Z-sets**: a row → integer weight, where insert is `+1`

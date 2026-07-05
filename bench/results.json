@@ -1,0 +1,141 @@
+{
+  "generated_utc": "2026-07-05T15:59:27+00:00",
+  "python": "3.12.4",
+  "aggregate_view_sql": "SELECT region, COUNT(*) AS n, SUM(amount) AS total, AVG(amount) AS mean, MIN(amount) AS lo, MAX(amount) AS hi FROM sales GROUP BY region",
+  "join_view_sql": "SELECT orders.oid, orders.uid, orders.amount, users.uname FROM orders JOIN users ON orders.uid = users.uid",
+  "config": {
+    "n": 50000,
+    "base_n": 50000,
+    "batch_sizes": [
+      1,
+      10,
+      100,
+      1000,
+      10000,
+      50000
+    ],
+    "join_orders": 20000,
+    "n_uids": 200,
+    "join_batches": [
+      1,
+      10,
+      100,
+      500,
+      2000
+    ]
+  },
+  "throughput": {
+    "rows": 50000,
+    "seconds": 1.3447834000107832,
+    "deltas_per_sec": 37180.70880381113
+  },
+  "latency": {
+    "warm_rows": 50000,
+    "mean_us": 22.439100255724043,
+    "p50_us": 21.10004425048828,
+    "p95_us": 24.500011932104826,
+    "p99_us": 43.50004019215703
+  },
+  "aggregate_state_size": {
+    "rows": 50000,
+    "snapshot_bytes": 9878,
+    "bytes_per_row": 0.19756
+  },
+  "join_state_size": {
+    "input_rows": 20000,
+    "snapshot_bytes": 626433,
+    "bytes_per_input_row": 31.32165
+  },
+  "aggregate_speedup_curve": [
+    {
+      "batch": 1,
+      "batch_fraction_of_base": 2e-05,
+      "incremental_ms": 0.023200002033263445,
+      "recompute_ms": 83.80920003401116,
+      "incremental_speedup": 3612.465202108522,
+      "cost_model_strategy": "incremental"
+    },
+    {
+      "batch": 10,
+      "batch_fraction_of_base": 0.0002,
+      "incremental_ms": 0.11680001625791192,
+      "recompute_ms": 94.46600003866479,
+      "incremental_speedup": 808.7841343281127,
+      "cost_model_strategy": "incremental"
+    },
+    {
+      "batch": 100,
+      "batch_fraction_of_base": 0.002,
+      "incremental_ms": 0.29969995375722647,
+      "recompute_ms": 92.88930002367124,
+      "incremental_speedup": 309.9409888428502,
+      "cost_model_strategy": "incremental"
+    },
+    {
+      "batch": 1000,
+      "batch_fraction_of_base": 0.02,
+      "incremental_ms": 2.704199985601008,
+      "recompute_ms": 90.33480001380667,
+      "incremental_speedup": 33.40536960831681,
+      "cost_model_strategy": "incremental"
+    },
+    {
+      "batch": 10000,
+      "batch_fraction_of_base": 0.2,
+      "incremental_ms": 25.208399980328977,
+      "recompute_ms": 108.46640000818297,
+      "incremental_speedup": 4.302787963251266,
+      "cost_model_strategy": "incremental"
+    },
+    {
+      "batch": 50000,
+      "batch_fraction_of_base": 1.0,
+      "incremental_ms": 122.78699997114018,
+      "recompute_ms": 189.08189999638125,
+      "incremental_speedup": 1.539917906951249,
+      "cost_model_strategy": "recompute"
+    }
+  ],
+  "join_speedup_curve": [
+    {
+      "batch_users": 1,
+      "fan_out": 100,
+      "incremental_ms": 2.3562999558635056,
+      "recompute_ms": 28.711099992506206,
+      "incremental_speedup": 12.184823889276245,
+      "cost_model_strategy": "incremental"
+    },
+    {
+      "batch_users": 10,
+      "fan_out": 100,
+      "incremental_ms": 5.5256999912671745,
+      "recompute_ms": 37.43450000183657,
+      "incremental_speedup": 6.774616801671845,
+      "cost_model_strategy": "incremental"
+    },
+    {
+      "batch_users": 100,
+      "fan_out": 100,
+      "incremental_ms": 16.70779997948557,
+      "recompute_ms": 43.287400039844215,
+      "incremental_speedup": 2.5908497883021115,
+      "cost_model_strategy": "incremental"
+    },
+    {
+      "batch_users": 500,
+      "fan_out": 100,
+      "incremental_ms": 100.64030002104118,
+      "recompute_ms": 89.15129996603355,
+      "incremental_speedup": 0.8858409598082916,
+      "cost_model_strategy": "incremental"
+    },
+    {
+      "batch_users": 2000,
+      "fan_out": 100,
+      "incremental_ms": 386.49820000864565,
+      "recompute_ms": 263.73329997295514,
+      "incremental_speedup": 0.6823661791104219,
+      "cost_model_strategy": "incremental"
+    }
+  ]
+}

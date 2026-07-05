@@ -39,6 +39,16 @@ class Project:
 
 
 @dataclass(frozen=True)
+class Distinct:
+    """SELECT DISTINCT: collapse Z-set multiplicities to set semantics — each row
+    with positive net weight appears exactly once. Non-linear: the operator keeps
+    per-row net weight and flips a row in/out only as its weight crosses zero.
+    Output schema = input schema."""
+
+    input: object
+
+
+@dataclass(frozen=True)
 class Count:
     """COUNT(*) for a group — the net Z-set weight of its rows. Output column `name`."""
 

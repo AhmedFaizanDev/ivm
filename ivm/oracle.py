@@ -42,6 +42,10 @@ def eval_plan(plan, tables):
             acc[out_row] = acc.get(out_row, 0) + w
         return out_schema, ZSet(acc)
 
+    if isinstance(plan, P.Distinct):
+        schema, z = eval_plan(plan.input, tables)
+        return schema, ZSet({row: 1 for row, w in z.items() if w > 0})
+
     if isinstance(plan, P.Aggregate):
         schema, z = eval_plan(plan.input, tables)
         idx = index_of(schema)

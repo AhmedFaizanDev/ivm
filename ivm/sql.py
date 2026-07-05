@@ -3,9 +3,9 @@ to the plan API (Source/Filter/Project/Join/.../Aggregate). The plan API is the
 stable core; this is a thin compiler on top. Pipeline: tokenize -> recursive-
 descent parse -> compile against a catalog {table: schema}.
 
-Supported: SELECT * | cols | aggregates, FROM t [alias],
+Supported: SELECT [DISTINCT] * | cols | aggregates, FROM t [alias],
 [INNER|LEFT|RIGHT|FULL [OUTER]] JOIN t2 [alias] ON a.k=b.k [AND ...],
-WHERE (comparisons / IS [NOT] NULL, AND/OR, parens), GROUP BY.
+WHERE (comparisons / IS [NOT] NULL, AND/OR, parens), GROUP BY, HAVING.
 See ivm-sql-frontend.md for the design note and deferred features."""
 
 import operator as _operator
@@ -128,13 +128,15 @@ class _JoinClause:
 
 
 class _Select:
-    def __init__(self, items, table, alias, joins, where, group_by):
+    def __init__(self, items, table, alias, joins, where, group_by, having=None, distinct=False):
         self.items = items  # "*" or list of _Item
         self.table = table
         self.alias = alias
         self.joins = joins
         self.where = where
         self.group_by = group_by  # list of _Col
+        self.having = having  # boolean expr over the aggregate output, or None
+        self.distinct = distinct
 
 
 # --------------------------------------------------------------------------- #
@@ -196,6 +198,7 @@ class _Parser:
 
     def parse(self):
         self.eat_kw("SELECT")
+        distinct = self.accept_kw("DISTINCT")
         items = self.parse_items()
         self.eat_kw("FROM")
         table, alias = self.parse_table_ref()
@@ -207,8 +210,9 @@ class _Parser:
             group_by = [self.parse_column()]
             while self.accept_punct(","):
                 group_by.append(self.parse_column())
+        having = self.parse_or() if self.accept_kw("HAVING") else None
         self.expect("eof")
-        return _Select(items, table, alias, joins, where, group_by)
+        return _Select(items, table, alias, joins, where, group_by, having, distinct)
 
     # -- select items --
 
@@ -318,6 +322,20 @@ class _Parser:
         return _Cmp(left, op, right)
 
     def parse_operand(self):
+        # an aggregate call as an operand (only meaningful in HAVING)
+        t = self.peek()
+        if (t.kind == "word" and t.value.upper() in _AGGS
+                and self.toks[self.pos + 1].kind == "punct"
+                and self.toks[self.pos + 1].value == "("):
+            func = self.next().value.upper()
+            self.eat_punct("(")
+            if self.peek().kind == "star":
+                self.next()
+                arg = "*"
+            else:
+                arg = self.parse_column()
+            self.eat_punct(")")
+            return _Agg(func, arg)
         negate = self.peek().kind == "minus"
         if negate:
             self.next()
@@ -391,17 +409,20 @@ class _Compiler:
 
         # 2. WHERE
         if ast.where is not None:
-            node = P.Filter(node, self._predicate(ast.where, working, aliases))
+            pred = self._predicate(ast.where, lambda o: self._operand(o, working, aliases))
+            node = P.Filter(node, pred)
 
-        # 3. GROUP BY / aggregates
+        # 3. GROUP BY / aggregates (+ HAVING, inside)
         has_agg = ast.items != "*" and any(isinstance(it.expr, _Agg) for it in ast.items)
-        if ast.group_by or has_agg:
-            return self._compile_grouped(node, ast, working, aliases)
+        if ast.group_by or has_agg or ast.having is not None:
+            node = self._compile_grouped(node, ast, working, aliases)
+        elif ast.items != "*":  # 4. SELECT projection
+            node = self._project(node, ast, working, aliases)
 
-        # 4. SELECT projection
-        if ast.items == "*":
-            return node
-        return self._project(node, ast, working, aliases)
+        # 5. DISTINCT wraps the final result
+        if ast.distinct:
+            node = P.Distinct(node)
+        return node
 
     # -- FROM + JOINs --
 
@@ -465,12 +486,13 @@ class _Compiler:
         if ast.items == "*":
             raise SqlError("SELECT * is not allowed with GROUP BY / aggregates")
         group_cols = [self._resolve(c, working, aliases) for c in ast.group_by]
-        aggs, output = [], []  # output: (out_name, source column in the post-agg schema)
+        aggs, output, agg_map = [], [], {}  # output: (out_name, post-agg source col)
         for it in ast.items:
             if isinstance(it.expr, _Agg):
                 a = self._agg_node(it, working, aliases)
                 aggs.append(a)
                 output.append((a.name, a.name))
+                agg_map[self._agg_key(it.expr, working, aliases)] = a.name
             else:
                 col = self._resolve(it.expr, working, aliases)
                 if col not in group_cols:
@@ -478,9 +500,15 @@ class _Compiler:
                 output.append((it.alias or col, col))
         agg_node = P.Aggregate(node, tuple(group_cols), tuple(aggs))
         post = list(group_cols) + [a.name for a in aggs]
-        if output == [(c, c) for c in post]:  # SELECT already matches the agg output
-            return agg_node
-        return P.Project(agg_node, tuple((name, _getter(src)) for name, src in output))
+
+        result = agg_node
+        if ast.having is not None:  # HAVING = a Filter over the aggregate output
+            operand_fn = self._having_operand(post, agg_map, working, aliases)
+            result = P.Filter(agg_node, self._predicate(ast.having, operand_fn))
+
+        if output == [(c, c) for c in post]:
+            return result
+        return P.Project(result, tuple((name, _getter(src)) for name, src in output))
 
     def _agg_node(self, item, working, aliases):
         agg = item.expr
@@ -488,6 +516,38 @@ class _Compiler:
             return P.Count(item.alias or "count")
         col = self._resolve(agg.arg, working, aliases)
         return _AGG_NODE[agg.func](item.alias or f"{agg.func.lower()}_{col}", col)
+
+    def _agg_key(self, agg, working, aliases):
+        # COUNT is treated as COUNT(*) regardless of arg (matches the engine)
+        if agg.func == "COUNT":
+            return ("COUNT",)
+        return (agg.func, self._resolve(agg.arg, working, aliases))
+
+    def _having_operand(self, post, agg_map, working, aliases):
+        """Resolve a HAVING operand against the post-aggregate schema: a bare
+        column (group col or agg output name), a literal, or an aggregate call
+        (COUNT(*)/SUM(col)/...) matched to a SELECTed aggregate's output column."""
+        postset = set(post)
+
+        def resolve(operand):
+            if isinstance(operand, _Lit):
+                v = operand.value
+                return lambda r, _v=v: _v
+            if isinstance(operand, _Agg):
+                name = agg_map.get(self._agg_key(operand, working, aliases))
+                if name is None:
+                    raise SqlError(
+                        f"HAVING uses {operand.func}(...) which is not in the SELECT list "
+                        f"(v1: HAVING aggregates must be selected)"
+                    )
+                return _getter(name)
+            if operand.table is not None:
+                raise SqlError(f"HAVING: qualified column {operand.table}.{operand.name} unsupported")
+            if operand.name not in postset:
+                raise SqlError(f"HAVING: unknown column {operand.name!r}")
+            return _getter(operand.name)
+
+        return resolve
 
     # -- projection: each output reads its SOURCE column, named by alias-or-column --
 
@@ -514,21 +574,24 @@ class _Compiler:
             raise SqlError(f"unknown column {col.name!r}")
         return col.name
 
-    def _predicate(self, node, working, aliases):
+    def _predicate(self, node, operand_fn):
+        """Compile a boolean expression to a Row predicate. `operand_fn` maps an
+        operand AST node to a getter callable — WHERE and HAVING pass different
+        resolvers (HAVING resolves against the post-aggregate schema)."""
         if isinstance(node, _And):
-            parts = [self._predicate(c, working, aliases) for c in node.items]
+            parts = [self._predicate(c, operand_fn) for c in node.items]
             return lambda r: all(p(r) for p in parts)
         if isinstance(node, _Or):
-            parts = [self._predicate(c, working, aliases) for c in node.items]
+            parts = [self._predicate(c, operand_fn) for c in node.items]
             return lambda r: any(p(r) for p in parts)
         if isinstance(node, _IsNull):
-            get = self._operand(node.operand, working, aliases)
+            get = operand_fn(node.operand)
             if node.negated:
                 return lambda r: get(r) is not None
             return lambda r: get(r) is None
         if isinstance(node, _Cmp):
-            lget = self._operand(node.left, working, aliases)
-            rget = self._operand(node.right, working, aliases)
+            lget = operand_fn(node.left)
+            rget = operand_fn(node.right)
             cmp = _CMP[node.op]
 
             def pred(r):
@@ -538,12 +601,14 @@ class _Compiler:
                 return cmp(a, b)
 
             return pred
-        raise SqlError("malformed WHERE expression")
+        raise SqlError("malformed predicate expression")
 
     def _operand(self, operand, working, aliases):
         if isinstance(operand, _Lit):
             v = operand.value
             return lambda r, _v=v: _v
+        if isinstance(operand, _Agg):
+            raise SqlError("aggregates are not allowed in WHERE (use HAVING)")
         name = self._resolve(operand, working, aliases)
         return _getter(name)
 

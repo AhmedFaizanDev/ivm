@@ -74,6 +74,34 @@ class ProjectOp(Operator):
         self._emit(ZSet(acc))
 
 
+class DistinctOp(Operator):
+    """SELECT DISTINCT. Keeps the accumulated net weight per row; emits +1 for a
+    row the instant its weight crosses 0 -> positive, and -1 the instant it
+    crosses back positive -> 0, so the output is always the set of present rows
+    each at weight 1. Batched multi-sign deltas resolve by net effect."""
+
+    _state_attrs = ("_counts",)
+
+    def __init__(self):
+        super().__init__()
+        self._counts = {}  # row -> accumulated net weight
+
+    def on_input(self, delta):
+        out = {}
+        for row, w in delta.items():
+            old = self._counts.get(row, 0)
+            new = old + w
+            if new == 0:
+                self._counts.pop(row, None)
+            else:
+                self._counts[row] = new
+            if new > 0 and old <= 0:
+                out[row] = out.get(row, 0) + 1
+            elif old > 0 and new <= 0:
+                out[row] = out.get(row, 0) - 1
+        self._emit(ZSet(out))
+
+
 class AggregateOp(Operator):
     """Stateful GROUP BY. Per group keeps [net_weight, running agg values].
     On a delta it snapshots the affected groups, applies the row updates, then
@@ -512,6 +540,14 @@ def compile_plan(node, engine, ops=None):
         child.subscribe(op.on_input)
         out_schema = tuple(name for name, _ in node.outputs)
         return op, out_schema
+
+    if isinstance(node, P.Distinct):
+        child, schema = compile_plan(node.input, engine, ops)
+        op = DistinctOp()
+        child.subscribe(op.on_input)
+        if ops is not None:
+            ops.append(op)
+        return op, schema
 
     if isinstance(node, P.Aggregate):
         child, schema = compile_plan(node.input, engine, ops)

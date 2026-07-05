@@ -112,6 +112,14 @@ Recorded so the eventual Rust port has numbers to beat (`tests/test_state_size.p
 
 **LOGGED LIMITATION (found in review, deferred — not a serialization issue): aggregates over a NULL-valued column crash.** `SUM`/`AVG`/`MIN`/`MAX` over a column that contains `NULL` raises `TypeError` (e.g. `MIN(amount)` when an amount is NULL — which outer joins can produce). SQL ignores NULLs in these aggregates; we don't yet. `COUNT(*)` is unaffected. Cheap fix when prioritized: skip `None` values in the sum/min/max accumulation. Until then, aggregate over non-nullable columns.
 
+## HAVING + DISTINCT — ✅ DONE (this session)
+
+Higher SQL coverage, TDD.
+- **DISTINCT** is a new stateful operator (`DistinctOp`): keeps per-row net weight and flips a row in/out only as its weight crosses zero (collapse multiplicities to set semantics). New `plan.Distinct`, independent oracle branch (`{row: 1 for w>0}`), compile branch, snapshot state (`_state_attrs=("_counts",)`), and `SELECT DISTINCT` in the front-end. Verified: 10-seed property test vs oracle + an adversarial BATCHED multi-sign probe (many presence crossings per delta) + SQLite cross-check.
+- **HAVING** is front-end only — a `Filter` on the aggregate output (the stateless filter on the aggregate's retract-old/assert-new deltas correctly adds/removes a group as its aggregate crosses the predicate boundary, verified by a boundary-oscillation test). HAVING operands resolve against the post-aggregate schema; `COUNT(*)`/`SUM(col)` in HAVING are matched to the SELECTed aggregate's output column. Aggregates are now rejected in `WHERE`.
+- Verified against **stdlib SQLite** (independent semantics oracle) over random insert/delete streams for DISTINCT (incl. with WHERE) and HAVING (COUNT/SUM, alias and `COUNT(*)` forms, `AND` with a group-column predicate). ~50 new tests.
+- LOGGED v1 limitation: a HAVING aggregate must also appear in SELECT (else a clear error). `COUNT(col)` is treated as `COUNT(*)` (pre-existing).
+
 ## Milestone 4 — decision point
 
 You now have a correct, tested tier-1/2 engine. Choose a direction with your professor:

@@ -16,20 +16,24 @@ README real.
 ## Scope (v1 — YAGNI)
 
 Supported:
-- `SELECT * | items` where an item is a column (`col` or `table.col`), or an
-  aggregate `COUNT(*) | COUNT(col) | SUM(col) | AVG(col) | MIN(col) | MAX(col)`,
-  each with optional `AS alias`.
+- `SELECT [DISTINCT] * | items` where an item is a column (`col` or `table.col`),
+  or an aggregate `COUNT(*) | COUNT(col) | SUM(col) | AVG(col) | MIN(col) |
+  MAX(col)`, each with optional `AS alias`. `DISTINCT` compiles to the `Distinct`
+  operator (collapse multiplicities to presence).
 - `FROM table [alias]`.
 - Zero or more joins: `[INNER|LEFT|RIGHT|FULL] [OUTER] JOIN table [alias] ON
   a.k = b.k [AND a.k2 = b.k2]*`. Bare `JOIN` = inner.
 - `WHERE expr`: comparisons (`= != <> < <= > >=`, `IS NULL`, `IS NOT NULL`) over
   a column and a column-or-literal, combined with `AND` / `OR`, parenthesised.
 - `GROUP BY col [, col]*` with the aggregates listed in SELECT.
+- `HAVING expr` — a predicate over the aggregate output; compiles to a `Filter`
+  on the aggregate. Operands are group columns, aggregate output names/aliases,
+  or aggregate calls (`COUNT(*)`, `SUM(col)`) matched to a SELECTed aggregate.
 
-Deferred (logged, not silently capped): `HAVING`, `ORDER BY`/`LIMIT` (views are
-unordered bags — irrelevant to IVM), `DISTINCT` (no DISTINCT operator yet),
-subqueries, arithmetic expressions in SELECT, self-joins via SQL (blocked by the
-plan's unique-column-name rule).
+Deferred (logged, not silently capped): `ORDER BY`/`LIMIT` (views are unordered
+bags — irrelevant to IVM), subqueries, arithmetic expressions in SELECT,
+self-joins via SQL (blocked by the plan's unique-column-name rule), and HAVING
+aggregates that are not also in the SELECT list.
 
 **Known semantic divergence (logged):** a GROUP BY-less *global* aggregate
 (`SELECT COUNT(*) FROM t`) over an EMPTY relation yields no row here, whereas SQL

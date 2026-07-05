@@ -9,6 +9,10 @@ from ivm import plan as P
 
 
 class Operator:
+    # Names of instance attributes that make up this operator's serializable
+    # state. Stateless operators (filter/project/source) keep the empty default.
+    _state_attrs = ()
+
     def __init__(self):
         self._subs = []
 
@@ -18,6 +22,14 @@ class Operator:
     def _emit(self, delta):
         for fn in self._subs:
             fn(delta)
+
+    def state(self):
+        """A serializable snapshot of this operator's state (empty if stateless)."""
+        return {name: getattr(self, name) for name in self._state_attrs}
+
+    def load(self, snap):
+        for name, value in snap.items():
+            setattr(self, name, value)
 
 
 class SourceOp(Operator):
@@ -68,6 +80,8 @@ class AggregateOp(Operator):
     emits, per affected group, a retraction of the old result row and an
     assertion of the new one — so the materialized output is always the current
     set of group rows. A group is dropped the instant its net weight hits 0."""
+
+    _state_attrs = ("_groups",)
 
     def __init__(self, group_by, aggregates, in_schema):
         super().__init__()
@@ -156,6 +170,8 @@ class JoinOp(Operator):
     contributes the delta-left ⋈ delta-right cross-term exactly once — in either
     order. Verified in tests/test_self_join.py."""
 
+    _state_attrs = ("_left_index", "_right_index")
+
     def __init__(self, left_keys, right_keys, left_schema, right_schema):
         super().__init__()
         lidx = index_of(left_schema)
@@ -203,6 +219,8 @@ class LeftJoinOp(Operator):
     matched rows), non-empty -> empty asserts the pads (the inner part retracts
     the matched rows). Emptiness is snapshotted before integrating the delta and
     re-checked after, so a batched right delta is handled by net effect."""
+
+    _state_attrs = ("_left_index", "_right_index")
 
     def __init__(self, left_keys, right_keys, left_schema, right_schema):
         super().__init__()
@@ -277,6 +295,8 @@ class RightJoinOp(Operator):
     transitions: a left insert/delete that flips a key between "no left" and
     "some left" flips every right row at that key between padded and matched."""
 
+    _state_attrs = ("_left_index", "_right_index")
+
     def __init__(self, left_keys, right_keys, left_schema, right_schema):
         super().__init__()
         lidx = index_of(left_schema)
@@ -348,6 +368,8 @@ class FullJoinOp(Operator):
     never both left- and right-padded (any key with both sides present is fully
     matched). Both sides flip: a left change flips the right rows at a key, a
     right change flips the left rows."""
+
+    _state_attrs = ("_left_index", "_right_index")
 
     def __init__(self, left_keys, right_keys, left_schema, right_schema):
         super().__init__()
@@ -468,70 +490,57 @@ def _agg_value(st, i, kind):
     return st[1 + i]  # SUM
 
 
-def compile_plan(node, engine):
-    """Build an operator graph for a plan. Returns (root_operator, schema)."""
+def compile_plan(node, engine, ops=None):
+    """Build an operator graph for a plan. Returns (root_operator, schema).
+
+    If `ops` is a list, every STATEFUL operator created is appended to it in a
+    deterministic (post-order) sequence. Rebuilding the same plan yields the same
+    sequence, so the engine can snapshot/restore per-operator state by position."""
     if isinstance(node, P.Source):
         op = engine._get_source(node.table, node.schema)
         return op, op.schema
 
     if isinstance(node, P.Filter):
-        child, schema = compile_plan(node.input, engine)
+        child, schema = compile_plan(node.input, engine, ops)
         op = FilterOp(node.predicate, schema)
         child.subscribe(op.on_input)
         return op, schema
 
     if isinstance(node, P.Project):
-        child, schema = compile_plan(node.input, engine)
+        child, schema = compile_plan(node.input, engine, ops)
         op = ProjectOp(node.outputs, schema)
         child.subscribe(op.on_input)
         out_schema = tuple(name for name, _ in node.outputs)
         return op, out_schema
 
     if isinstance(node, P.Aggregate):
-        child, schema = compile_plan(node.input, engine)
+        child, schema = compile_plan(node.input, engine, ops)
         op = AggregateOp(node.group_by, node.aggregates, schema)
         child.subscribe(op.on_input)
+        if ops is not None:
+            ops.append(op)
         out_schema = tuple(node.group_by) + tuple(a.name for a in node.aggregates)
         return op, out_schema
 
-    if isinstance(node, P.Join):
-        lop, ls = compile_plan(node.left, engine)
-        rop, rs = compile_plan(node.right, engine)
+    if isinstance(node, (P.Join, P.LeftJoin, P.RightJoin, P.FullJoin)):
+        lop, ls = compile_plan(node.left, engine, ops)
+        rop, rs = compile_plan(node.right, engine, ops)
         right_keyset = set(node.right_keys)
         r_nonkey = [i for i, name in enumerate(rs) if name not in right_keyset]
         out_schema = tuple(ls) + tuple(rs[i] for i in r_nonkey)
         if len(set(out_schema)) != len(out_schema):
             raise ValueError(f"join output has duplicate column names: {out_schema}")
-        op = JoinOp(node.left_keys, node.right_keys, ls, rs)
-        lop.subscribe(op.on_left)
-        rop.subscribe(op.on_right)
-        return op, out_schema
-
-    if isinstance(node, P.LeftJoin):
-        lop, ls = compile_plan(node.left, engine)
-        rop, rs = compile_plan(node.right, engine)
-        right_keyset = set(node.right_keys)
-        r_nonkey = [i for i, name in enumerate(rs) if name not in right_keyset]
-        out_schema = tuple(ls) + tuple(rs[i] for i in r_nonkey)
-        if len(set(out_schema)) != len(out_schema):
-            raise ValueError(f"left join output has duplicate column names: {out_schema}")
-        op = LeftJoinOp(node.left_keys, node.right_keys, ls, rs)
-        lop.subscribe(op.on_left)
-        rop.subscribe(op.on_right)
-        return op, out_schema
-
-    if isinstance(node, (P.RightJoin, P.FullJoin)):
-        lop, ls = compile_plan(node.left, engine)
-        rop, rs = compile_plan(node.right, engine)
-        right_keyset = set(node.right_keys)
-        r_nonkey = [i for i, name in enumerate(rs) if name not in right_keyset]
-        out_schema = tuple(ls) + tuple(rs[i] for i in r_nonkey)
-        if len(set(out_schema)) != len(out_schema):
-            raise ValueError(f"outer join output has duplicate column names: {out_schema}")
-        op_cls = RightJoinOp if isinstance(node, P.RightJoin) else FullJoinOp
+        op_cls = {
+            P.Join: JoinOp,
+            P.LeftJoin: LeftJoinOp,
+            P.RightJoin: RightJoinOp,
+            P.FullJoin: FullJoinOp,
+        }[type(node)]
         op = op_cls(node.left_keys, node.right_keys, ls, rs)
         lop.subscribe(op.on_left)
         rop.subscribe(op.on_right)
+        if ops is not None:
+            ops.append(op)
         return op, out_schema
 
     raise NotImplementedError(f"compiler has no rule for {type(node).__name__}")

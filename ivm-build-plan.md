@@ -104,6 +104,14 @@ Recorded so the eventual Rust port has numbers to beat (`tests/test_state_size.p
 - **State is LINEAR and LEAK-FREE.** A join retains exactly one index entry per input row per side; an aggregate keeps one group per live key (MIN/MAX additionally keep a per-group value multiset). After draining every row, all operator state returns to empty — verified whitebox for all four join kinds and a COUNT+SUM+MIN+MAX aggregate. This is the guard against Materialize-style state blow-up.
 - **Throughput (CPython prototype): ~115,000 single-row deltas/sec** through a `GROUP BY` view (40k insert+delete deltas in ~0.35 s, one Engine, one view). Unoptimized — the Python baseline; the Rust port should beat it by orders of magnitude. Full suite: ~570 tests in <10 s (property checks throttled via `check_every`), and CI is green on Python 3.10/3.11/3.12.
 
+## Serialization / resumability — ✅ DONE (this session)
+
+`engine.snapshot()` / `engine.restore(snap)`. A process restart no longer forces a full recompute: `snapshot()` captures every stateful operator's state (join indexes, aggregate accumulators + MIN/MAX multisets) and each view's materialized Z-set as a point-in-time, picklable object. `restore()` injects it into an engine whose views were re-added with the SAME plans (plans carry lambdas → code/config; only state is data). Format: stdlib **`pickle`** (handles arbitrary hashable row tuples / bytes / floats / None that JSON can't; documented trusted-input caveat). Uniform `_state_attrs` protocol on operators; `compile_plan` threads an `ops` collector in deterministic post-order; the four join branches were consolidated into one dispatch.
+- Oracle-verified: **restore-then-continue == never-restarted** over 10 random seeds (join → COUNT/SUM/MIN/MAX, drained to empty), == the recompute oracle at every checkpoint, and point-in-time (a snapshot doesn't drift as the engine runs on).
+- ADVERSARIAL (`test_serialization_adversarial.py`): snapshot→pickle→restore into a FRESH engine at EVERY step, across all four join kinds, with NULL-padded outer-join rows + floats + negatives in state, multi-view engines, empty engines, and a wrong-shape-restore error. Zero divergence.
+
+**LOGGED LIMITATION (found in review, deferred — not a serialization issue): aggregates over a NULL-valued column crash.** `SUM`/`AVG`/`MIN`/`MAX` over a column that contains `NULL` raises `TypeError` (e.g. `MIN(amount)` when an amount is NULL — which outer joins can produce). SQL ignores NULLs in these aggregates; we don't yet. `COUNT(*)` is unaffected. Cheap fix when prioritized: skip `None` values in the sum/min/max accumulation. Until then, aggregate over non-nullable columns.
+
 ## Milestone 4 — decision point
 
 You now have a correct, tested tier-1/2 engine. Choose a direction with your professor:

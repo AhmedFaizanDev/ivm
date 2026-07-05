@@ -1,0 +1,48 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ivm"
+version = "0.1.0"
+description = "Embeddable Incremental View Maintenance — keep SQL views fresh by applying only deltas, with no external service."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "AhmedFaizanDev" }]
+keywords = [
+    "incremental-view-maintenance",
+    "ivm",
+    "dbsp",
+    "sql",
+    "materialized-view",
+    "streaming",
+    "database",
+    "z-set",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Database",
+    "Topic :: Database :: Database Engines/Servers",
+]
+dependencies = []
+
+[project.optional-dependencies]
+# The SQLite session-extension capture backend needs apsw (its wheels ship the
+# ENABLE_SESSION + PREUPDATE_HOOK flags stdlib sqlite3 lacks). Everything else,
+# including the trigger-based SQLite backend, is pure standard library.
+sqlite-session = ["apsw>=3.40"]
+dev = ["pytest>=7", "apsw>=3.40"]
+
+[project.urls]
+Homepage = "https://github.com/AhmedFaizanDev/ivm"
+Repository = "https://github.com/AhmedFaizanDev/ivm"
+
+[tool.hatch.build.targets.wheel]
+packages = ["ivm"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
